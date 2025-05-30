@@ -1,0 +1,776 @@
+Can you improve the following modules README.md documentation. Look for ways to describe this more concisely. Fix any grammer mistakes
+
+Filename: ./src/util.ts
+export const uuid = () =>
+  typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+    ? crypto.randomUUID()
+    : Math.random().toString(36).substring(2, 15) + Math.random().toString(36).substring(2, 15)
+
+export const now = () =>
+  typeof performance !== 'undefined' && typeof performance.now === 'function' ? performance.now() : Date.now()
+Filename: ./src/log.ts
+import { defaultTrace, Fields, Level, Trace } from './trace.js'
+
+/**
+ * Represents a logging event that can handle template literals, metadata, and simple messages.
+ * @example
+ * logger.log`Processing request with id ${requestId}`;
+ * logger.log({ requestId: '12345' })`Processing request.`;
+ * logger.log('Application started successfully.');
+ */
+type LoggerEvent = {
+  /**
+   * Logs a message using template literals with interpolated strings.
+   * @example
+   * logger.log`Processing request with id ${requestId}`;
+   */
+  (template: { raw: readonly string[] | ArrayLike<string> }, ...substitutions: any[]): void
+
+  /**
+   * Logs a message with additional metadata for structured logging.
+   * @example
+   * logger.log({ requestId: '12345' })`Processing request.`;
+   */
+  (meta: Record<string, any>): {
+    (template: { raw: readonly string[] | ArrayLike<string> }, ...substitutions: any[]): void
+    (message: string | number | null | boolean | Error): void
+  }
+
+  /**
+   * Logs a simple message without interpolation.
+   * @example
+   * logger.log('Application started successfully.');
+   */
+  (message: string | number | null | boolean | Error): void
+}
+
+/**
+ * Represents a span for tracking operations with different log levels.
+ * @example
+ * logger.span('process-request', { requestId: '123' }, async () => {
+ *   // do work
+ * });
+ */
+type LoggerSpan = {
+  /**
+   * Creates a span with metadata and executes a function within it.
+   * @example
+   * logger.span('process-request', { requestId: '123' }, async () => {
+   *   // do work
+   * });
+   */
+  <R>(name: string, meta: Record<string, any> | undefined | null, fn: () => R): R
+
+  /**
+   * Creates a span and executes a function within it.
+   * @example
+   * logger.span('process-request', async () => {
+   *   // do work
+   * });
+   */
+  <R>(name: string, fn: () => R): R
+
+  /**
+   * Creates a span with metadata and returns an object with an exit method.
+   * @example
+   * const span = logger.span('process-request', { requestId: '123' });
+   * try {
+   *   // do work
+   * } finally {
+   *   span.exit();
+   * }
+   */
+  (name: string, meta: Record<string, any> | undefined | null): { exit: () => void }
+
+  /**
+   * Creates a span and returns an object with an exit method.
+   * @example
+   * const span = logger.span('process-request');
+   * try {
+   *   // do work
+   * } finally {
+   *   span.exit();
+   * }
+   */
+  (name: string): { exit: () => void }
+
+  /** Creates spans at TRACE level */
+  trace: LoggerSpan
+  /** Creates spans at DEBUG level */
+  debug: LoggerSpan
+  /** Creates spans at INFO level */
+  info: LoggerSpan
+  /** Creates spans at WARN level */
+  warn: LoggerSpan
+  /** Creates spans at ERROR level */
+  error: LoggerSpan
+}
+
+/**
+ * A logger instance that provides structured logging with different levels and spans.
+ * @example
+ * const logger = new Logger(trace);
+ * logger.info`Processing request ${requestId}`;
+ * logger.span('operation', async () => {
+ *   // do work
+ * });
+ */
+export class Logger {
+  public meta: Record<string, any> = {}
+  public span: LoggerSpan
+  public trace: LoggerEvent
+  public debug: LoggerEvent
+  public info: LoggerEvent
+  public warn: LoggerEvent
+  public error: LoggerEvent
+
+  constructor(trace: Trace) {
+    const logfn = (level: Level, fields?: Record<string, any>) => {
+      const self = this
+      return function log(a: any, ...subs: any[]): any {
+        // Handle template literals
+        if (Array.isArray(a) && Array.isArray((a as any).raw)) {
+          const message = String.raw(a as any, ...subs)
+          return trace.event(undefined, level, message, { ...self.meta, ...fields })
+        }
+
+        // Handle string
+        if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean' || a === null)
+          return trace.event(undefined, level, a.toString(), { ...self.meta, ...fields })
+
+        // Handle error
+        if (a instanceof Error) {
+          const f = { ...self.meta, ...fields, stack: a.stack, name: a.name, cause: a.cause }
+          return trace.event(a.name, level, a.message, f)
+        }
+
+        // Handle object
+        if (typeof a === 'object' && !Array.isArray(a) && a !== null) return logfn(level, { ...fields, ...a })
+
+        // Handle everything else
+        return trace.event(undefined, level, JSON.stringify(a), { ...self.meta, ...fields })
+      }
+    }
+
+    this.trace = logfn(Level.TRACE)
+    this.debug = logfn(Level.DEBUG)
+    this.info = logfn(Level.INFO)
+    this.warn = logfn(Level.WARN)
+    this.error = logfn(Level.ERROR)
+
+    const spanFn = (level: Level) => {
+      const self = this
+      return function span(
+        name: string,
+        fields?: Fields | undefined | null | (() => void | Promise<void>),
+        fn2?: () => void | Promise<void>,
+      ) {
+        const fn1 = typeof fields === 'function'
+        const sp = trace.span(name, level, fn1 ? self.meta : { ...self.meta, ...fields })
+        if (!fn1 && typeof fn2 === 'undefined') return { exit: () => trace.exit(sp) }
+        try {
+          const r = fn1 ? fields() : fn2!()
+          if (r instanceof Promise) {
+            return r.finally(() => trace.exit(sp))
+          }
+          trace.exit(sp)
+          return r
+        } catch (err) {
+          trace.exit(sp)
+          throw err
+        }
+      }
+    }
+
+    this.span = Object.assign(spanFn(Level.TRACE), {
+      trace: spanFn(Level.TRACE),
+      debug: spanFn(Level.DEBUG),
+      info: spanFn(Level.INFO),
+      warn: spanFn(Level.WARN),
+      error: spanFn(Level.ERROR),
+    }) as Logger['span']
+  }
+}
+
+export const getTarget = () => {
+  const e = new Error()
+  const lines = e.stack?.split('\n')
+  const last = lines?.slice(1)?.findLastIndex((x) => /\@lickle[\/+]trace/.test(x))
+  if (!last || last < 0) return undefined
+  return lines?.[last + 1]?.replace(/^\s{0,}at\s?/, '').trim()
+}
+
+const defaultLogger = new Logger(defaultTrace)
+
+export const { span, trace, debug, info, warn, error } = defaultLogger
+
+export default defaultLogger
+Filename: ./src/index.ts
+export * from './subscribe.js'
+export * from './trace.js'
+Filename: ./src/subscribe.ts
+import { Event, Level, Span, Subscriber, Trace, setSubscriber } from './trace.js'
+import { now, uuid } from './util.js'
+
+/**
+ * Builder for creating and configuring trace subscribers.
+ * @example
+ * const builder = new Builder()
+ *   .withMinLevel(Level.INFO)
+ *   .withLayer(new ConsoleLayer())
+ *   .install();
+ */
+export class Builder {
+  private minLevel = Level.TRACE
+  private layers: Subscriber[] = []
+
+  /**
+   * Sets the minimum log level for the subscriber.
+   * @example
+   * builder.withMinLevel(Level.INFO);
+   */
+  withMinLevel(level: Level) {
+    this.minLevel = level
+    return this
+  }
+
+  /**
+   * Adds a subscriber layer to handle trace events.
+   * @example
+   * builder.withLayer(new ConsoleLayer());
+   */
+  withLayer(sub: Subscriber) {
+    this.layers.push(sub)
+    return this
+  }
+
+  /**
+   * Installs the configured subscriber into a trace instance.
+   * If no trace is provided, installs into the default trace.
+   * @example
+   * builder.install(); // installs to default trace
+   * builder.install(customTrace); // installs to custom trace
+   */
+  install(trace?: Trace) {
+    const sub: Subscriber = {
+      minLevel: this.minLevel,
+      newSpan: (meta) => {
+        const layer = this.layers.find((x) => x.newSpan)
+        if (!layer) return { id: uuid(), meta }
+        return layer.newSpan!(meta)
+      },
+      onEnter: (sp) => this.layers.forEach((l) => l.onEnter?.(sp)),
+      onExit: (sp) => this.layers.forEach((l) => l.onExit?.(sp)),
+      onEvent: (evt) => this.layers.forEach((l) => l.onEvent?.(evt)),
+    }
+    if (!trace) return setSubscriber(sub)
+    // @ts-ignore
+    return (trace.sub = sub)
+  }
+}
+
+/** Maps log levels to their string representations */
+const levels = {
+  [Level.TRACE]: 'TRACE',
+  [Level.DEBUG]: 'DEBUG',
+  [Level.INFO]: 'INFO',
+  [Level.WARN]: 'WARN',
+  [Level.ERROR]: 'ERROR',
+}
+
+/**
+ * Console subscriber that logs spans and events to the console.
+ * Uses appropriate console methods based on log level.
+ * @example
+ * const consoleLayer = new ConsoleLayer();
+ * new Builder().withLayer(consoleLayer).install();
+ */
+export class ConsoleLayer implements Subscriber {
+  /**
+   * Logs when a span is entered.
+   * @example
+   * // Output: [INFO] [SPAN:ENTER] (process-request) { requestId: '123' }
+   */
+  onEnter(span: Span) {
+    console.log(`[${levels[span.meta.level]}] [SPAN:ENTER] (${span.meta.name})`, span.meta.fields)
+  }
+
+  /**
+   * Logs when a span is exited, including its duration.
+   * @example
+   * // Output: [INFO] [SPAN:EXIT] (process-request) (123.45ms) { requestId: '123' }
+   */
+  onExit(span: Span) {
+    const duration = now() - span.meta.ts
+    console.log(
+      `[${levels[span.meta.level]}] [SPAN:EXIT] (${span.meta.name}) (${duration.toFixed(2)}ms)`,
+      span.meta.fields,
+    )
+  }
+
+  /**
+   * Logs events using appropriate console methods based on level.
+   * @example
+   * // Output: [INFO] (user-login): User logged in { userId: '123' }
+   */
+  onEvent(e: Event) {
+    const args = [`[${levels[e.meta.level]}] (${e.meta.name ?? ''}):`, e.message || '', e.meta.fields]
+    if (e.meta.level === Level.ERROR) return console.error(...args)
+    if (e.meta.level === Level.WARN) return console.warn(...args)
+    if (e.meta.level === Level.INFO) return console.info(...args)
+    if (e.meta.level === Level.DEBUG) return console.debug(...args)
+    if (e.meta.level === Level.TRACE) return console.trace(...args)
+    console.log(...args)
+  }
+}
+Filename: ./src/trace.ts
+import { uuid, now } from './util.js'
+
+/**
+ * Log levels in ascending order of severity.
+ * @example
+ * if (level >= Level.INFO) {
+ *   // Handle important logs
+ * }
+ */
+export enum Level {
+  TRACE = 10,
+  DEBUG = 20,
+  INFO = 30,
+  WARN = 40,
+  ERROR = 50,
+}
+
+/** Type for structured logging fields */
+export type Fields = Record<string, unknown>
+
+/**
+ * Metadata for spans and events.
+ * @example
+ * const meta: Metadata = {
+ *   level: Level.INFO,
+ *   name: 'process-request',
+ *   ts: Date.now(),
+ *   fields: { requestId: '123' }
+ * };
+ */
+export interface Metadata {
+  level: Level
+  name?: string | undefined
+  ts: number // timestamp
+  parent?: string | undefined // parent span
+  fields?: Fields | undefined
+}
+
+/**
+ * Represents a span in the trace.
+ * @example
+ * const span: Span = {
+ *   id: 'span-123',
+ *   meta: { level: Level.INFO, name: 'operation' }
+ * };
+ */
+export interface Span {
+  id: string
+  meta: Metadata
+}
+
+/**
+ * Represents a log event in the trace.
+ * @example
+ * const event: Event = {
+ *   meta: { level: Level.INFO, name: 'user-login' },
+ *   message: 'User logged in successfully'
+ * };
+ */
+export interface Event {
+  meta: Metadata
+  message?: string | undefined
+}
+
+/**
+ * Interface for subscribing to trace events.
+ * @example
+ * const subscriber: Subscriber = {
+ *   onEvent: (evt) => console.log(evt.message),
+ *   minLevel: Level.INFO
+ * };
+ */
+export interface Subscriber<S extends Span = Span> {
+  newSpan?: (meta: Metadata) => S
+  onEnter?: (span: S) => void
+  onExit?: (span: S) => void
+  onEvent?: (evt: Event) => void
+  minLevel?: Level // filter threshold
+}
+
+/**
+ * Main tracing class for managing spans and events.
+ * @example
+ * const trace = new Trace({
+ *   onEvent: (evt) => console.log(evt.message),
+ *   minLevel: Level.INFO
+ * });
+ * trace.span('operation', Level.INFO, { id: '123' });
+ */
+export class Trace {
+  private stack: Span[] = []
+  constructor(private sub: Subscriber = {}) {}
+
+  /** Gets the current subscriber. */
+  getSubscriber() {
+    return this.sub
+  }
+
+  /** Sets a new subscriber. */
+  setSubscriber(s: Subscriber) {
+    this.sub = s
+  }
+
+  /**
+   * Creates a new span with the given name, level, and optional fields.
+   * @example
+   * const span = trace.span('process-request', Level.INFO, { requestId: '123' });
+   */
+  span = (name: string, level = Level.INFO, fields?: Fields) => {
+    if (!this.shouldEmit(level)) return { id: '', meta: { name, level, ts: 0 } } // no-op span
+    const meta = this.getMeta(name, level, fields)
+    const sp = this.sub.newSpan ? this.sub.newSpan(meta) : { id: uuid(), meta }
+    this.sub.onEnter?.(sp)
+    this.stack.push(sp)
+    return sp
+  }
+
+  /**
+   * Enters an existing span, pushing it onto the stack.
+   * @example
+   * trace.enter(span);
+   */
+  enter = (sp: Span) => {
+    if (!this.shouldEmit(sp.meta.level)) return
+    this.sub.onEnter?.(sp)
+    this.stack.push(sp)
+  }
+
+  /**
+   * Exits a span, removing it from the stack if it's the top span.
+   * @example
+   * trace.exit(span);
+   */
+  exit = (sp: Span) => {
+    if (!this.shouldEmit(sp.meta.level)) return
+    this.sub.onExit?.(sp)
+    if (this.stack[this.stack.length - 1]?.id === sp.id) this.stack.pop() // pop only if it's the top
+  }
+
+  /**
+   * Creates a new event with the given name, level, message, and optional fields.
+   * @example
+   * trace.event('user-login', Level.INFO, 'User logged in', { userId: '123' });
+   */
+  event = (name: string | undefined, level: Level, msg?: string, fields?: Fields) => {
+    if (!this.shouldEmit(level)) return
+    const evt: Event = { meta: this.getMeta(name, level, fields), message: msg }
+    this.sub.onEvent?.(evt)
+  }
+
+  private getMeta = (name: string | undefined, level: Level, fields?: Fields) => {
+    const p = this.stack[this.stack.length - 1]
+    return { name, level, ts: now(), parent: p?.id, fields: fields ? { ...fields } : undefined }
+  }
+
+  private shouldEmit = (lvl?: Level) =>
+    lvl &&
+    lvl >= (this.sub.minLevel ?? Level.TRACE) &&
+    (this.sub.newSpan || this.sub.onEnter || this.sub.onExit || this.sub.onEvent)
+}
+
+/**
+ * Default global trace instance.
+ * @example
+ * defaultTrace.event('startup', Level.INFO, 'Application started');
+ */
+export const defaultTrace = new Trace()
+
+export const { span, enter, exit, event } = defaultTrace
+
+/**
+ * Sets a new subscriber for the default trace.
+ * @example
+ * setSubscriber({
+ *   onEvent: (evt) => console.log(evt.message),
+ *   minLevel: Level.INFO
+ * });
+ */
+export const setSubscriber = (s: Subscriber) => defaultTrace.setSubscriber(s)
+
+/**
+ * Gets the current subscriber from the default trace.
+ * @example
+ * const currentSub = getSubscriber();
+ */
+export const getSubscriber = () => defaultTrace.getSubscriber()
+
+Filename: README.md
+
+# @lickle/trace
+
+A tiny structured tracing utility with spans, events, and a higher-level ergonomic logging abstraction. inspired by rust tracing.
+
+[![Build Status](https://img.shields.io/github/actions/workflow/status/Pingid/lickle-trace/test.yml?branch=main&style=flat&colorA=000000&colorB=000000)](https://github.com/Pingid/lickle-trace/actions?query=workflow:Test)
+[![Build Size](https://img.shields.io/bundlephobia/minzip/@lickle/trace?label=bundle%20size&style=flat&colorA=000000&colorB=000000)](https://bundlephobia.com/result?p=@lickle/trace)
+[![Version](https://img.shields.io/npm/v/@lickle/trace?style=flat&colorA=000000&colorB=000000)](https://www.npmjs.com/package/@lickle/trace)
+[![Downloads](https://img.shields.io/npm/dt/@lickle/trace.svg?style=flat&colorA=000000&colorB=000000)](https://www.npmjs.com/package/@lickle/trace)
+
+## Install
+
+Install the `@lickle/trace` library using your preferred package manager:
+
+```bash
+npm install @lickle/trace
+```
+
+### Logging
+
+The `log` module is a thin wrapper around the core trace API that gives you a simple, template-literal-friendly logger with `levels` and `spans`.
+
+```typescript
+import logger, { info, error, span } from '@lickle/trace/log'
+
+// Simple messages
+info`App started`
+// ➜ [INFO] (): App started
+
+// Template literals + metadata
+const requestId = 'abc123'
+info`Handling request ${requestId}`
+// ➜ [INFO] (): Handling request abc123
+
+// Adding structured fields
+info({ userId: 'u-42' })`User logged in`
+// ➜ [INFO] (): User logged in { userId: 'u-42' }
+
+// Logging an error
+try {
+  throw new Error('Something went wrong')
+} catch (err) {
+  error(err)
+}
+// ➜ [ERROR] (Error): Something went wrong { stack: '...', name: 'Error' }
+
+// Creating a span to time an operation
+span('process-order', { orderId: 'o-99' }, async () => {
+  // ...do work...
+})
+// ➜ [INFO] [SPAN:ENTER] (process-order) { orderId: 'o-99' }
+// ➜ [INFO] [SPAN:EXIT] (process-order) (23.45ms) { orderId: 'o-99' }
+```
+
+> **Note**: The default logger instance is pre-configured to use the global trace. You can also create your own Logger by passing a custom Trace instance.
+
+### Adding Subscribers
+
+By default, `@lickle/trace` doesn't emit anything unless you attach a subscriber. The simplest way is to use the built-in console subscriber.
+
+```typescript
+import { Builder, ConsoleLayer } from '@lickle/trace/subscribe'
+
+// Build and install a subscriber that logs everything at INFO+ to the console
+new Builder().withMinLevel(30 /* Level.INFO */).withLayer(new ConsoleLayer()).install()
+
+// Now all trace events and spans at INFO+ will show up in your console
+```
+
+If you want to handle trace events differently (e.g., send errors to a remote service), just add your own subscriber:
+
+```typescript
+import { Level } from '@lickle/trace/trace'
+import { Builder } from '@lickle/trace/subscribe'
+
+const myLayer = {
+  minLevel: Level.ERROR,
+  onEvent(evt) {
+    // evt.meta.level === Level.ERROR
+    sendToErrorService(evt)
+  },
+}
+```
+
+## Core Trace API
+The core `trace` module gives you low-level control over spans and events. Use this when you need custom behavior or want to wire up your own tracing backend.
+```typescript
+import {
+  Trace,
+  event,
+  span,
+  Level,
+  defaultTrace,
+  setSubscriber,
+  getSubscriber,
+} from '@lickle/trace/trace'
+
+// 1. Emitting a simple event
+event('startup', Level.INFO, 'Application initialized')
+// ➜ [INFO] (startup): Application initialized
+
+// 2. Creating a span and manually exiting it
+const sp = span('db.query', Level.DEBUG, { sql: 'SELECT * FROM users' })
+try {
+  // ...perform DB query...
+} finally {
+  defaultTrace.exit(sp)
+}
+// ➜ [DEBUG] [SPAN:ENTER] (db.query) { sql: 'SELECT * FROM users' }
+// ➜ [DEBUG] [SPAN:EXIT] (db.query) (5.67ms) { sql: 'SELECT * FROM users' }
+
+// 3. Using an ad-hoc Trace instance
+const customTrace = new Trace({
+  minLevel: Level.INFO,
+  onEvent(evt) {
+    // e.g. send to a log aggregator
+    remoteLogger.send(evt)
+  },
+  onEnter: (span) => console.log('ENTER:', span.meta.name),
+  onExit: (span) => console.log('EXIT:', span.meta.name, 'took', Date.now() - span.meta.ts, 'ms'),
+})
+
+customTrace.span('cache-warm', Level.INFO, { cache: 'redis' }, () => {
+  // ...warm cache...
+})
+// ➜ ENTER: cache-warm
+// ➜ EXIT: cache-warm took 12.34 ms
+```
+
+**API Reference**:
+
+* **`new Trace(subscriber?: Subscriber)`**  
+    Creates a new tracing instance. If you omit `subscriber`, it uses a no-op subscriber.
+    
+* **`trace.span(name: string, level?: Level, fields?: Record<string, unknown>) → Span`**  
+    Starts a new span if `level >= subscriber.minLevel`. Returns a `Span` object with `id` and `meta`.
+    
+* **`trace.exit(span: Span)`**  
+    Ends a span and notifies subscribers (if the span was emitted).
+    
+* **`trace.event(name: string \| undefined, level: Level, message?: string, fields?: Record<string, unknown>)`**  
+    Emits a one-off log event.
+    
+* **`trace.enter(span: Span)`**  
+    Manually re-enters an existing span (rarely needed).
+    
+* **`trace.getSubscriber()` / `trace.setSubscriber(subscriber)`**  
+    Inspect or replace the subscriber for this `Trace` instance.
+    
+* **`Level` (enum)**
+    
+    ```ts
+    enum Level {
+      TRACE = 10,
+      DEBUG = 20,
+      INFO  = 30,
+      WARN  = 40,
+      ERROR = 50,
+    }
+    ```
+    
+
+* * *
+
+## Subscribe Module
+
+The `subscribe` module provides helpers to build and install subscribers. You’ll most often use `Builder` and `ConsoleLayer`, but you can register any object that implements the `Subscriber` interface.
+
+```ts
+import { Builder, ConsoleLayer } from '@lickle/trace/subscribe'
+
+// 1. ConsoleLayer example
+new Builder()
+  .withMinLevel(Level.DEBUG)
+  .withLayer(new ConsoleLayer())
+  .install()
+
+// Output for spans and events at DEBUG+:
+// ➜ [DEBUG] [SPAN:ENTER] (init) {}
+// ➜ [DEBUG] [SPAN:EXIT] (init) (3.21ms) {}
+// ➜ [INFO] (init.complete): Initialized!
+
+// 2. Custom subscriber example
+import { Level } from '@lickle/trace/trace'
+
+const metricsLayer = {
+  minLevel: Level.INFO,
+  onEvent(evt) {
+    // Increment a metric counter for each INFO+ event
+    metrics.increment(evt.meta.name ?? 'unknown')
+  },
+  newSpan(meta) {
+    // Return a custom Span shape if needed
+    return { id: meta.name + '-' + Date.now(), meta }
+  },
+  onEnter(span) {
+    // e.g. start a timer for this span in a metrics backend
+    metrics.startTimer(span.id)
+  },
+  onExit(span) {
+    metrics.stopTimer(span.id)
+  },
+}
+
+new Builder().withLayer(metricsLayer).install()
+```
+
+**API Reference**:
+
+* **`new Builder()`**  
+    Creates a subscriber builder.
+    
+* **`.withMinLevel(level: Level) → Builder`**  
+    Only emit spans/events with `level >= minLevel`.
+    
+* **`.withLayer(layer: Subscriber) → Builder`**  
+    Add one or more subscriber layers (e.g., `ConsoleLayer` or your own implementation).
+    
+* **`.install(trace?: Trace) → void`**  
+    Installs the composed subscriber into the default trace, or into a provided `Trace` instance.
+    
+* **`ConsoleLayer` (class)**
+    
+    * `onEnter(span: Span)` – logs `[LEVEL] [SPAN:ENTER] (name)` and fields
+        
+    * `onExit(span: Span)` – logs `[LEVEL] [SPAN:EXIT] (name) (duration ms)` and fields
+        
+    * `onEvent(evt: Event)` – logs `[LEVEL] (name): message { fields }` using appropriate `console` method
+        
+
+* * *
+
+## Quick Reference
+
+```ts
+import logger, { debug, info, warn, error, span } from '@lickle/trace/log'
+import { Level, event, span as lowLevelSpan } from '@lickle/trace/trace'
+import { Builder, ConsoleLayer } from '@lickle/trace/subscribe'
+
+// 1. Attach a console subscriber
+new Builder().withMinLevel(Level.INFO).withLayer(new ConsoleLayer()).install()
+
+// 2. Use high-level logger
+info('Server is up')
+// ➜ [INFO] (): Server is up
+
+// 3. Use low-level trace directly
+lowLevelSpan('cache.populate', Level.DEBUG, { size: 100 }, () => {
+  // ...populate cache...
+})
+// ➜ [DEBUG] [SPAN:ENTER] (cache.populate) { size: 100 }
+// ➜ [DEBUG] [SPAN:EXIT] (cache.populate) (8.90ms) { size: 100 }
+```
+
+* * *
+
+## License
+
+This project is licensed under the MIT License.
+
+MIT © [Dan Beaven](https://github.com/Pingid)
+
