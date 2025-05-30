@@ -1,0 +1,11 @@
+{
+  "name": "@lickle/trace",
+  "version": "0.0.1-alpha.1",
+  "license": "MIT",
+  "exports": {
+    ".": "./src/index.ts",
+    "./log": "./src/log.ts",
+    "./trace": "./src/trace.ts",
+    "./subscribe": "./src/subscribe.ts"
+  }
+}
