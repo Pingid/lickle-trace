@@ -1,5 +1,7 @@
-import { Event, Level, Span, Subscriber, Trace, setSubscriber } from './trace.js'
+import { Event, Level, Metadata, Span, Subscriber, Trace, setSubscriber } from './trace.js'
 import { now, uuid } from './util.js'
+
+type FilterFn = (type: 'event' | 'span', level: Level, meta: Metadata) => boolean
 
 /**
  * Builder for creating and configuring trace subscribers.
@@ -10,16 +12,12 @@ import { now, uuid } from './util.js'
  *   .install();
  */
 export class Builder {
+  private filters: FilterFn[] = []
   private minLevel = Level.TRACE
   private layers: Subscriber[] = []
 
-  /**
-   * Sets the minimum log level for the subscriber.
-   * @example
-   * builder.withMinLevel(Level.INFO);
-   */
-  withMinLevel(level: Level): Builder {
-    this.minLevel = level
+  withFilter(filter: FilterFn): Builder {
+    this.filters.push(filter)
     return this
   }
 
@@ -41,16 +39,26 @@ export class Builder {
    * builder.install(customTrace); // installs to custom trace
    */
   install(trace?: Trace): void {
+    const filter = <E extends Event | Span>(event: E, f: (x: E) => void): boolean => {
+      if (this.filters.length === 0) return true
+      for (const filter of this.filters) {
+        if (filter(event.type, event.meta.level, event.meta)) {
+          f(event)
+          return true
+        }
+      }
+      return false
+    }
     const sub: Subscriber = {
       minLevel: this.minLevel,
       newSpan: (meta) => {
         const layer = this.layers.find((x) => x.newSpan)
-        if (!layer) return { id: uuid(), meta }
+        if (!layer) return { id: uuid(), meta, type: 'span' }
         return layer.newSpan!(meta)
       },
-      onEnter: (sp) => this.layers.forEach((l) => l.onEnter?.(sp)),
-      onExit: (sp) => this.layers.forEach((l) => l.onExit?.(sp)),
-      onEvent: (evt) => this.layers.forEach((l) => l.onEvent?.(evt)),
+      onEnter: (sp) => filter(sp, () => this.layers.forEach((l) => l.onEnter?.(sp))),
+      onExit: (sp) => filter(sp, () => this.layers.forEach((l) => l.onExit?.(sp))),
+      onEvent: (evt) => filter(evt, () => this.layers.forEach((l) => l.onEvent?.(evt))),
     }
     if (!trace) return setSubscriber(sub)
     // @ts-ignore
@@ -60,11 +68,11 @@ export class Builder {
 
 /** Maps log levels to their string representations */
 const levels = {
-  [Level.TRACE]: 'TRACE',
-  [Level.DEBUG]: 'DEBUG',
-  [Level.INFO]: 'INFO',
-  [Level.WARN]: 'WARN',
-  [Level.ERROR]: 'ERROR',
+  [Level.TRACE]: 'trace',
+  [Level.DEBUG]: 'debug',
+  [Level.INFO]: 'info',
+  [Level.WARN]: 'warn',
+  [Level.ERROR]: 'error',
 }
 
 /**
@@ -75,13 +83,9 @@ const levels = {
  * new Builder().withLayer(consoleLayer).install();
  */
 export class ConsoleLayer implements Subscriber {
-  /**
-   * Logs when a span is entered.
-   * @example
-   * // Output: [INFO] [SPAN:ENTER] (process-request) { requestId: '123' }
-   */
+  /** Logs when a span is entered. */
   onEnter(span: Span) {
-    console.log(`[${levels[span.meta.level]}] [SPAN:ENTER] (${span.meta.name})`, span.meta.fields)
+    console.log(`[${levels[span.meta.level]}] (${span.meta.name}) enter`, JSON.stringify(span.meta.fields))
   }
 
   /**
@@ -92,8 +96,8 @@ export class ConsoleLayer implements Subscriber {
   onExit(span: Span) {
     const duration = now() - span.meta.ts
     console.log(
-      `[${levels[span.meta.level]}] [SPAN:EXIT] (${span.meta.name}) (${duration.toFixed(2)}ms)`,
-      span.meta.fields,
+      `[${levels[span.meta.level]}] (${span.meta.name}) exit (${duration.toFixed(2)}ms)`,
+      JSON.stringify(span.meta.fields),
     )
   }
 
@@ -103,7 +107,11 @@ export class ConsoleLayer implements Subscriber {
    * // Output: [INFO] (user-login): User logged in { userId: '123' }
    */
   onEvent(e: Event): void {
-    const args = [`[${levels[e.meta.level]}] (${e.meta.name ?? ''}):`, e.message || '', e.meta.fields]
+    const args = [
+      `[${levels[e.meta.level]}] (${e.meta.name ? ` (${e.meta.name})` : ''}`,
+      e.message || '',
+      JSON.stringify(e.meta.fields),
+    ]
     if (e.meta.level === Level.ERROR) return console.error(...args)
     if (e.meta.level === Level.WARN) return console.warn(...args)
     if (e.meta.level === Level.INFO) return console.info(...args)

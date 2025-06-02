@@ -112,20 +112,24 @@ export class Logger {
   public info: LoggerEvent
   public warn: LoggerEvent
   public error: LoggerEvent
+  public name: (name: string) => Logger
 
-  constructor(trace: Trace) {
+  constructor(
+    trace: Trace,
+    private _name?: string,
+  ) {
     const logfn = (level: Level, fields?: Record<string, any>) => {
       const self = this
       return function log(a: any, ...subs: any[]): any {
         // Handle template literals
         if (Array.isArray(a) && Array.isArray((a as any).raw)) {
           const message = String.raw(a as any, ...subs)
-          return trace.event(undefined, level, message, { ...self.meta, ...fields })
+          return trace.event(self._name, level, message, { ...self.meta, ...fields })
         }
 
         // Handle string
         if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean' || a === null)
-          return trace.event(undefined, level, a.toString(), { ...self.meta, ...fields })
+          return trace.event(self._name, level, a.toString(), { ...self.meta, ...fields })
 
         // Handle error
         if (a instanceof Error) {
@@ -137,7 +141,7 @@ export class Logger {
         if (typeof a === 'object' && !Array.isArray(a) && a !== null) return logfn(level, { ...fields, ...a })
 
         // Handle everything else
-        return trace.event(undefined, level, JSON.stringify(a), { ...self.meta, ...fields })
+        return trace.event(self._name, level, JSON.stringify(a), { ...self.meta, ...fields })
       }
     }
 
@@ -178,6 +182,12 @@ export class Logger {
       warn: spanFn(Level.WARN),
       error: spanFn(Level.ERROR),
     }) as Logger['span']
+
+    this.name = (name: string) => {
+      const logger = new Logger(trace, name)
+      logger.meta = { ...this.meta }
+      return logger
+    }
   }
 }
 
@@ -197,5 +207,6 @@ export const debug = defaultLogger.debug
 export const info = defaultLogger.info
 export const warn = defaultLogger.warn
 export const error = defaultLogger.error
+export const name = defaultLogger.name
 
 export default defaultLogger

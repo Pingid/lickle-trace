@@ -45,6 +45,7 @@ export interface Metadata {
  * };
  */
 export interface Span {
+  type: 'span'
   id: string
   meta: Metadata
 }
@@ -58,6 +59,8 @@ export interface Span {
  * };
  */
 export interface Event {
+  id: string
+  type: 'event'
   meta: Metadata
   message?: string | undefined
 }
@@ -70,10 +73,10 @@ export interface Event {
  *   minLevel: Level.INFO
  * };
  */
-export interface Subscriber<S extends Span = Span> {
-  newSpan?: (meta: Metadata) => S
-  onEnter?: (span: S) => void
-  onExit?: (span: S) => void
+export interface Subscriber<S extends Partial<Span> = Partial<Span>> {
+  newSpan?: (meta: Metadata) => Span & S
+  onEnter?: (span: Span & S) => void
+  onExit?: (span: Span & S) => void
   onEvent?: (evt: Event) => void
   minLevel?: Level // filter threshold
 }
@@ -107,9 +110,9 @@ export class Trace {
    * const span = trace.span('process-request', Level.INFO, { requestId: '123' });
    */
   span = (name: string, level = Level.INFO, fields?: Fields): Span => {
-    if (!this.shouldEmit(level)) return { id: '', meta: { name, level, ts: 0 } } // no-op span
+    if (!this.shouldEmit(level)) return { type: 'span' as const, id: '', meta: { name, level, ts: 0 } } // no-op span
     const meta = this.getMeta(name, level, fields)
-    const sp = this.sub.newSpan ? this.sub.newSpan(meta) : { id: uuid(), meta }
+    const sp = { type: 'span' as const, id: uuid(), meta, ...(this.sub.newSpan ? this.sub.newSpan(meta) : {}) }
     this.sub.onEnter?.(sp)
     this.stack.push(sp)
     return sp
@@ -144,7 +147,7 @@ export class Trace {
    */
   event = (name: string | undefined, level: Level, msg?: string, fields?: Fields) => {
     if (!this.shouldEmit(level)) return
-    const evt: Event = { meta: this.getMeta(name, level, fields), message: msg }
+    const evt: Event = { id: uuid(), type: 'event', meta: this.getMeta(name, level, fields), message: msg }
     this.sub.onEvent?.(evt)
   }
 
