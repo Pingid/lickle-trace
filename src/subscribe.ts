@@ -108,7 +108,7 @@ export class ConsoleLayer implements Subscriber {
    */
   onEvent(e: Event): void {
     const args = [
-      `[${levels[e.meta.level]}] (${e.meta.name ? ` (${e.meta.name})` : ''}`,
+      `[${levels[e.meta.level]}]${e.meta.name ? ` (${e.meta.name})` : ''}`,
       e.message || '',
       JSON.stringify(e.meta.fields),
     ]
