@@ -1,4 +1,4 @@
-import { Event, Level, Metadata, Span, Subscriber, Trace, setSubscriber } from './trace.js'
+import { Event, Fields, Level, Metadata, Span, Subscriber, Trace, setSubscriber } from './trace.js'
 import { now, uuid } from './util.js'
 
 type FilterFn = (type: 'event' | 'span', level: Level, meta: Metadata) => boolean
@@ -73,7 +73,7 @@ const levels = {
   [Level.INFO]: 'info',
   [Level.WARN]: 'warn',
   [Level.ERROR]: 'error',
-}
+} as const
 
 /**
  * Console subscriber that logs spans and events to the console.
@@ -82,10 +82,33 @@ const levels = {
  * const consoleLayer = new ConsoleLayer();
  * new Builder().withLayer(consoleLayer).install();
  */
+/**
+ * Console subscriber that logs spans and events to the console.
+ * Uses appropriate console methods based on log level.
+ * @example
+ * const consoleLayer = new ConsoleLayer();
+ * new Builder().withLayer(consoleLayer).install();
+ */
 export class ConsoleLayer implements Subscriber {
+  constructor(
+    private print: (level: (typeof levels)[keyof typeof levels], message: string, fields?: Fields) => void = (
+      level,
+      message,
+      fields,
+    ) => {
+      if (fields) console?.[level](message, fields)
+      else console?.[level](message)
+    },
+  ) {}
+
+  private log(level: Level, message: string, fields?: Fields) {
+    const name = levels[level]
+    this.print(name, message, fields)
+  }
+
   /** Logs when a span is entered. */
   onEnter(span: Span) {
-    console.log(`[${levels[span.meta.level]}] (${span.meta.name}) enter`, JSON.stringify(span.meta.fields))
+    this.log(span.meta.level, `enter -> (${span.meta.name})`, span.meta.fields)
   }
 
   /**
@@ -95,10 +118,7 @@ export class ConsoleLayer implements Subscriber {
    */
   onExit(span: Span) {
     const duration = now() - span.meta.ts
-    console.log(
-      `[${levels[span.meta.level]}] (${span.meta.name}) exit (${duration.toFixed(2)}ms)`,
-      JSON.stringify(span.meta.fields),
-    )
+    this.log(span.meta.level, `exit <- (${span.meta.name}) ${duration.toFixed(2)}ms`, span.meta.fields)
   }
 
   /**
@@ -107,16 +127,6 @@ export class ConsoleLayer implements Subscriber {
    * // Output: [INFO] (user-login): User logged in { userId: '123' }
    */
   onEvent(e: Event): void {
-    const args = [
-      `[${levels[e.meta.level]}]${e.meta.name ? ` (${e.meta.name})` : ''}`,
-      e.message || '',
-      JSON.stringify(e.meta.fields),
-    ]
-    if (e.meta.level === Level.ERROR) return console.error(...args)
-    if (e.meta.level === Level.WARN) return console.warn(...args)
-    if (e.meta.level === Level.INFO) return console.info(...args)
-    if (e.meta.level === Level.DEBUG) return console.debug(...args)
-    if (e.meta.level === Level.TRACE) return console.trace(...args)
-    console.log(...args)
+    this.log(e.meta.level, `${e.meta.name ? `(${e.meta.name})` : ''}${e.message ? ` ${e.message}` : ''}`, e.meta.fields)
   }
 }
