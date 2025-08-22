@@ -1,6 +1,6 @@
 {
   "name": "@lickle/trace",
-  "version": "0.0.1-alpha.4",
+  "version": "0.0.1-alpha.5",
   "description": "A minimal, structured tracing utility for TypeScript/JavaScript, inspired by Rust's tracing crate. It provides spans, events, and a higher-level logging abstraction.",
   "author": "Dan Beaven <dm.beaven@gmail.com>",
   "repository": {
@@ -19,11 +19,6 @@
       "types": "./lib/ts/index.d.ts",
       "import": "./lib/esm/index.js",
       "require": "./lib/cjs/index.js"
-    },
-    "./log": {
-      "types": "./lib/ts/log.d.ts",
-      "import": "./lib/esm/log.js",
-      "require": "./lib/cjs/log.js"
     },
     "./subscribe": {
       "types": "./lib/ts/subscribe.d.ts",
