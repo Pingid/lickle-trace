@@ -8,38 +8,56 @@
     "url": "git+https://github.com/Pingid/lickle-trace.git"
   },
   "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  },
   "type": "module",
   "main": "lib/cjs/index.js",
   "types": "lib/ts/index.d.ts",
   "module": "lib/esm/index.js",
   "sideEffects": false,
   "exports": {
-    "./package.json": "./package.json",
     ".": {
       "types": "./lib/ts/index.d.ts",
-      "import": "./lib/esm/index.js",
-      "require": "./lib/cjs/index.js"
+      "browser": {
+        "import": "./lib/esm/browser.js",
+        "require": "./lib/cjs/browser.js"
+      },
+      "node": {
+        "import": "./lib/esm/node.js",
+        "require": "./lib/cjs/node.js"
+      },
+      "default": {
+        "import": "./lib/esm/index.js",
+        "require": "./lib/cjs/index.js"
+      }
     },
-    "./subscribe": {
-      "types": "./lib/ts/subscribe.d.ts",
-      "import": "./lib/esm/subscribe.js",
-      "require": "./lib/cjs/subscribe.js"
+    "./node": {
+      "import": "./lib/esm/node.js",
+      "require": "./lib/cjs/node.js",
+      "types": "./lib/ts/node.d.ts"
+    },
+    "./browser": {
+      "import": "./lib/esm/browser.js",
+      "require": "./lib/cjs/browser.js",
+      "types": "./lib/ts/browser.d.ts"
     },
     "./trace": {
-      "types": "./lib/ts/trace.d.ts",
       "import": "./lib/esm/trace.js",
-      "require": "./lib/cjs/trace.js"
+      "require": "./lib/cjs/trace.js",
+      "types": "./lib/ts/trace.d.ts"
     }
+  },
+  "browser": {
+    "./lib/cjs/index.js": "./lib/cjs/browser.js",
+    "./lib/esm/index.js": "./lib/esm/browser.js"
   },
   "files": [
     "lib",
-    "src",
-    "README.md",
-    "package.json",
-    "!**/*.test.*",
-    "tsconfig.json"
+    "README.md"
   ],
   "keywords": [
+    "tracing",
     "logging",
     "logger",
     "debug"
@@ -52,9 +70,11 @@
     "test": "vitest"
   },
   "devDependencies": {
-    "prettier": "^3.3.3",
-    "typescript": "^5.6.3",
-    "vitest": "^3.1.4"
+    "@types/node": "^24.5.2",
+    "jsdom": "^27.0.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2",
+    "vitest": "^3.2.4"
   },
   "prettier": {
     "semi": false,
