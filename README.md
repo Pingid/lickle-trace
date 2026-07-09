@@ -1,6 +1,6 @@
 # @lickle/trace
 
-A minimal, structured tracing utility for TypeScript/JavaScript, inspired by Rust's `tracing` crate. It provides spans, events, and a higher-level logging abstraction.
+A minimal, structured tracing library for TypeScript/JavaScript, inspired by Rust's [`tracing`](https://docs.rs/tracing) crate. It provides spans, events, and an ergonomic template-literal logger on top.
 
 [![Build Status](https://img.shields.io/github/actions/workflow/status/Pingid/lickle-trace/test.yml?branch=main&style=flat&colorA=000000&colorB=000000)](https://github.com/Pingid/lickle-trace/actions?query=workflow:Test)
 [![Build Size](https://img.shields.io/bundlephobia/minzip/@lickle/trace?label=bundle%20size&style=flat&colorA=000000&colorB=000000)](https://bundlephobia.com/result?p=@lickle/trace)
@@ -9,217 +9,160 @@ A minimal, structured tracing utility for TypeScript/JavaScript, inspired by Rus
 
 ## Installation
 
-Install the `@lickle/trace` library using your preferred package manager:
-
 ```bash
 npm install @lickle/trace
 ```
 
-## Usage
+## Quick start
 
-`@lickle/trace` has two main interfaces: a high-level Logger for common logging patterns and a low-level Trace API for fine-grained control and custom integrations.
+By default nothing is output — install a **layer** to receive spans and events. `init()` is a shortcut that installs the built-in console layer on the default trace:
 
-**1. Attaching a Subscriber (Required)**  
- By default, `@lickle/trace` doesn't output anything. You need to attach a subscriber to process trace events. The simplest way is to use the built-in console subscriber:
+```ts
+import { init } from '@lickle/trace'
+import log from '@lickle/trace/log'
 
-```typescript
-import { Builder, ConsoleLayer, Level } from '@lickle/trace/subscribe'
+init() // shorthand for: defaultTrace.install(Console.layer())
 
-// Configure and install a subscriber to log INFO level and above to the console.
-new Builder().withMinLevel(Level.INFO).withLayer(new ConsoleLayer()).install()
+log.info`server listening on ${8080}`
+// ➜ server listening on 8080
 
-// Now, all trace events and spans at INFO level and above will appear in your console.
+await log.span('handle-request', { path: '/users' }, async () => {
+  log.debug('querying database')
+})
+// ➜ enter -> (handle-request) { path: '/users' }
+// ➜  querying database
+// ➜ exit <- (handle-request) 12.34ms { path: '/users' }
 ```
 
-You can also create custom subscribers to send trace data to external services (e.g., logging aggregators, metrics systems). See the [Subscribe Module](#subscribe-module) section for details.
+### Entrypoints
 
-**2. Using the Logger**  
- The `log` module provides an ergonomic, template-literal-friendly logger with `levels` and `spans`. It's a thin wrapper around the core trace API.
+| Import                | Description                                                    |
+| --------------------- | -------------------------------------------------------------- |
+| `@lickle/trace`       | The core trace API and default instance, resolved per platform |
+| `@lickle/trace/log`   | The default logger and its methods, bound to the default trace |
+| `@lickle/trace/layer` | `Console`, `compose`, `minLevel`, `filter`                     |
 
-```typescript
-import logger, { info, error, span } from '@lickle/trace/log'
+The root import adapts via export conditions: on Node the active-span registry is the `AsyncLocalStorage`-backed build — the span chain is scoped per async task, so concurrent requests never see each other's spans and unclosed spans can't leak — while browsers and other runtimes get a universal shared-stack build. The correct registry is selected automatically, so there is no separate entrypoint to import.
 
-// Simple messages
-info`App started`
-// ➜ [INFO] (): App started
+## The logger
 
-// Template literals with interpolated data
-const requestId = 'abc123'
-info`Handling request ${requestId}`
-// ➜ [INFO] (): Handling request abc123
+The logger is a thin, ergonomic wrapper over the trace API with `trace`/`debug`/`info`/`warn`/`error` methods.
 
-// Structured logging with metadata fields
-info({ userId: 'u-42' })`User logged in`
-// ➜ [INFO] (): User logged in { userId: 'u-42' }
+```ts
+import log, { createLog } from '@lickle/trace/log'
 
-// Logging errors directly
+// Template literals
+log.info`Handling request ${requestId}`
+
+// Plain messages
+log.info('Application started')
+
+// Structured fields — pass metadata with a message...
+log.info({ userId: 'u-42' }, 'User logged in')
+
+// ...or attach metadata first, then log. Note: nothing is emitted
+// until the returned function is called.
+log.info({ userId: 'u-42' })`User logged in`
+
+// Errors capture stack, name, and cause as fields
 try {
   throw new Error('Something went wrong')
 } catch (err) {
-  error(err)
+  log.error(err)
 }
-// ➜ [ERROR] (Error): Something went wrong { stack: '...', name: 'Error' }
 
-// Creating a span to measure operation duration
-span('process-order', { orderId: 'o-99' }, async () => {
-  // ... perform work ...
-})
-// ➜ [INFO] [SPAN:ENTER] (process-order) { orderId: 'o-99' }
-// ➜ [INFO] [SPAN:EXIT] (process-order) (23.45ms) { orderId: 'o-99' }
+// Derive a logger that merges fields into everything it emits.
+// Derivations compose: log.with(a).with(b) merges both.
+const apiLog = log.with({ service: 'gateway' })
+apiLog.warn('rate limited') // fields: { service: 'gateway' }
 ```
 
-> **Note**: The default logger instance automatically uses the globally configured trace. You can also instantiate Logger with a custom Trace instance if needed.
+Spans measure operations. Called with a function, the span runs through `trace.scope`: it ends when the function returns (or the promise settles — even on throw), and under the Node build the span chain is confined to the callback. Without a function you get a span handle whose lifetime you own — end it with `.end()` (or a `using` declaration):
 
-**3. Using the Core Trace API**  
- The core `trace` module offers low-level control over spans and events. Use this when you need custom behavior or want to integrate with a specific tracing backend.
+```ts
+// Runs at INFO by default; per-level variants are available
+await log.span('process-order', { orderId: 'o-99' }, async () => {
+  // ... work ...
+})
 
-```typescript
-import { Trace, event, span, Level, defaultTrace, setSubscriber, getSubscriber } from '@lickle/trace/trace'
+log.span.debug('parse-config', () => {
+  // ... work ...
+})
 
-// Emitting a standalone event
-event('startup', Level.INFO, 'Application initialized')
-// ➜ [INFO] (startup): Application initialized
-
-// Creating and manually managing a span
-const dbQuerySpan = span('db.query', Level.DEBUG, { sql: 'SELECT * FROM users' })
+const span = log.span('read-file')
 try {
-  // ... perform DB query ...
+  // ... work ...
 } finally {
-  defaultTrace.exit(dbQuerySpan) // Explicitly exit the span
+  span.end()
 }
-// ➜ [DEBUG] [SPAN:ENTER] (db.query) { sql: 'SELECT * FROM users' }
-// ➜ [DEBUG] [SPAN:EXIT] (db.query) (5.67ms) { sql: 'SELECT * FROM users' }
-
-// Using an ad-hoc Trace instance with a custom subscriber
-const customTrace = new Trace({
-  minLevel: Level.INFO,
-  onEvent(evt) {
-    // Example: send to a remote log aggregator
-    // remoteLogger.send(evt);
-    console.log('CUSTOM EVENT:', evt.message)
-  },
-  onEnter: (span) => console.log('SPAN ENTERED:', span.meta.name),
-  onExit: (span) => console.log('SPAN EXITED:', span.meta.name, 'took', Date.now() - span.meta.ts, 'ms'),
-})
-
-customTrace.span('cache-warm', Level.INFO, { cache: 'redis' }, () => {
-  // ... warm cache ...
-})
-// ➜ SPAN ENTERED: cache-warm
-// ➜ CUSTOM EVENT: Span 'cache-warm' started. (Internal trace event if implemented)
-// ➜ SPAN EXITED: cache-warm took 12.34 ms
 ```
 
-## API Reference
+## The trace API
 
-### Core Trace Module
+A `Trace` is the core: it creates spans, emits events, and forwards both to the installed layer. `createTrace` builds one, and a default instance (`defaultTrace`) is exported alongside the bound logger helpers.
 
-`@lickle/trace/trace` The `Trace` class and associated types are the foundation of the library.
+```ts
+import { defaultTrace as trace, Level } from '@lickle/trace'
 
-- `new Trace(subscriber?: Subscriber)`
+// One-off events, attributed to the active span if one exists
+trace.event('Application initialized', Level.INFO)
 
-  Creates a new tracing instance. If no `subscriber` is provided, it uses a no-op subscriber.
-
-- `trace.span(name: string, level?: Level, fields?: Fields) → Span`
-
-  Starts a new span if `level` meets the subscriber's `minLevel`. Returns a `Span` object with `id` and `meta`.
-
-- `trace.exit(span: Span)`
-
-  Ends a span and notifies subscribers. Only pops the span from the internal stack if it's the topmost.
-
-- `trace.event(name: string | undefined, level: Level, message?: string, fields?: Fields)`
-
-  Emits a one-off log event.
-
-- `trace.enter(span: Span)`
-
-  Manually pushes an existing span onto the active span stack. Rarely needed for typical usage.
-
-- `trace.getSubscriber()` / `trace.setSubscriber(subscriber)`
-
-  Inspect or replace the subscriber for this Trace instance.
-
-- `Level` (enum): Log severity levels (ascending order).
-
-  ```typeScript
-  enum Level {
-    TRACE = 10,
-    DEBUG = 20,
-    INFO = 30,
-    WARN = 40,
-    ERROR = 50,
-  }
-  ```
-
-- `defaultTrace`: A globally exported Trace instance.
-
-- `setSubscriber(subscriber)`: Helper to set the subscriber for defaultTrace.
-
-- `getSubscriber()`: Helper to get the subscriber from defaultTrace.
-
-### Subscribe Module
-
-`@lickle/trace/subscribe` Provides tools for building and installing subscribers.
-
-- `new Builder()`
-
-  Creates a fluent subscriber builder.
-
-- `.withMinLevel(level: Level) → Builder`
-
-  Sets the minimum log level for the subscriber. Only events/spans at this level or higher will be processed.
-
-- `.withLayer(layer: Subscriber) → Builder`
-
-  Adds one or more subscriber layers. You can use `ConsoleLayer` or your own custom implementations.
-
-- `.install(trace?: Trace) → void`
-
-  Installs the configured subscriber. If `trace` is provided, it installs into that specific `Trace` instance; otherwise, it installs into the `defaultTrace`.
-
-- `ConsoleLayer` (class)
-
-  A built-in `Subscriber` that logs events and spans to the console using appropriate `console` methods.
-
-- `onEnter(span: Span)`: Logs span entry.
-- `onExit(span: Span)`: Logs span exit, including duration.
-- `onEvent(evt: Event)`: Logs events with message and fields.
-
-### Custom Subscriber Example
-
-```typescript
-import { Level, Subscriber } from '@lickle/trace/trace'
-import { Builder } from '@lickle/trace/subscribe'
-
-const metricsLayer: Subscriber = {
-  minLevel: Level.INFO,
-  onEvent(evt) {
-    // Example: Increment a metric counter for each INFO+ event
-    // metrics.increment(evt.meta.name ?? 'unknown_event');
-    console.log(`METRIC: Event '${evt.meta.name}' occurred.`)
-  },
-  newSpan(meta) {
-    // Example: Return a custom Span shape for specific needs
-    return { id: `${meta.name}-${Date.now()}`, meta }
-  },
-  onEnter(span) {
-    // Example: Start a timer in a metrics backend for this span
-    // metrics.startTimer(span.id);
-    console.log(`METRIC: Timer started for span '${span.meta.name}'.`)
-  },
-  onExit(span) {
-    // Example: Stop the timer and record the duration
-    // metrics.stopTimer(span.id);
-    console.log(`METRIC: Timer stopped for span '${span.meta.name}'.`)
-  },
+// Spans are disposable — `using` ends them at scope exit
+{
+  using sp = trace.span('db.query', Level.DEBUG, { sql: 'SELECT 1' })
+  sp.setFields({ rows: 3 })
 }
 
-new Builder().withLayer(metricsLayer).install()
+// Or scope a function; the span ends when it returns/settles
+await trace.scope('warm-cache', async (sp) => {
+  sp.setFields({ keys: 128 })
+})
+
+// Explicit parenting that never depends on the active stack
+const parent = trace.span('request')
+const child = parent.child('validate')
+child.end()
+parent.end()
 ```
+
+Each span carries an opaque `id` and `parentId`, and both spans and events carry a `timestamp` in wall-clock milliseconds (sub-ms precise); diff two timestamps for a duration. The ids are opaque strings — an OTLP exporter translates them into spec-shaped 16-byte trace / 8-byte span ids at export time.
+
+Custom instances take an injectable context — span registry, layer, clock, and id generator:
+
+```ts
+import { createTrace, alsRegistry } from '@lickle/trace'
+
+const trc = createTrace() // uses the platform-default registry (ALS on Node)
+const custom = createTrace({ spans: alsRegistry(), now: () => myClock.now(), uid: () => myIds.next() })
+```
+
+## Layers
+
+A layer receives span lifecycle callbacks and events. Implement the `Layer` interface to send trace data anywhere:
+
+```ts
+import { defaultTrace, Level, type Layer } from '@lickle/trace'
+import { compose, minLevel, filter, Console } from '@lickle/trace/layer'
+
+const metricsLayer: Layer<{ start: number }> = {
+  minLevel: Level.INFO,
+  newSpan: () => ({ start: performance.now() }), // stored on span.ext
+  onExit: (span) => metrics.timing(span.name, performance.now() - span.ext!.start),
+  onEvent: (evt) => metrics.increment(evt.message ?? 'event'),
+}
+
+defaultTrace.install(
+  compose(
+    minLevel(Level.WARN, Console.layer()), // console only sees WARN+
+    filter((item) => item.type !== 'span' || item.name !== 'health-check', metricsLayer),
+  ),
+)
+```
+
+- `compose(...layers)` fans callbacks out to every layer, respecting each layer's own `minLevel` and keeping `span.ext` state isolated per layer.
+- `minLevel(level, layer)` returns a copy of `layer` gated to `level` and above.
+- `filter(pred, layer)` hides spans/events for which `pred` returns false; a span rejected at creation is hidden for its whole lifecycle.
 
 ## License
-
-This project is licensed under the MIT License.
 
 MIT © [Dan Beaven](https://github.com/Pingid)

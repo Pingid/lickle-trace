@@ -1,6 +1,6 @@
 {
   "name": "@lickle/trace",
-  "version": "0.0.1-alpha.4",
+  "version": "0.0.1-alpha.6",
   "description": "A minimal, structured tracing utility for TypeScript/JavaScript, inspired by Rust's tracing crate. It provides spans, events, and a higher-level logging abstraction.",
   "author": "Dan Beaven <dm.beaven@gmail.com>",
   "repository": {
@@ -9,57 +9,63 @@
   },
   "license": "MIT",
   "type": "module",
-  "main": "lib/cjs/index.js",
-  "types": "lib/ts/index.d.ts",
-  "module": "lib/esm/index.js",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "module": "dist/index.js",
   "sideEffects": false,
   "exports": {
     "./package.json": "./package.json",
     ".": {
-      "types": "./lib/ts/index.d.ts",
-      "import": "./lib/esm/index.js",
-      "require": "./lib/cjs/index.js"
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
     },
     "./log": {
-      "types": "./lib/ts/log.d.ts",
-      "import": "./lib/esm/log.js",
-      "require": "./lib/cjs/log.js"
+      "types": "./dist/log.d.ts",
+      "import": "./dist/log.js"
     },
-    "./subscribe": {
-      "types": "./lib/ts/subscribe.d.ts",
-      "import": "./lib/esm/subscribe.js",
-      "require": "./lib/cjs/subscribe.js"
+    "./layer": {
+      "types": "./dist/layer/index.d.ts",
+      "import": "./dist/layer/index.js"
+    }
+  },
+  "imports": {
+    "#registry": {
+      "browser": "./src/registry/universal.ts",
+      "node": "./src/registry/node.ts",
+      "default": "./src/registry/universal.ts"
     },
-    "./trace": {
-      "types": "./lib/ts/trace.d.ts",
-      "import": "./lib/esm/trace.js",
-      "require": "./lib/cjs/trace.js"
+    "#layer/util": {
+      "browser": "./src/layer/util/browser.ts",
+      "node": "./src/layer/util/node.ts",
+      "default": "./src/layer/util/universal.ts"
     }
   },
   "files": [
-    "lib",
+    "dist",
     "src",
-    "README.md",
-    "package.json",
-    "!**/*.test.*",
-    "tsconfig.json"
+    "!**/*.test.*"
   ],
   "keywords": [
     "logging",
     "logger",
+    "tracing",
+    "spans",
+    "structured-logging",
     "debug"
   ],
   "scripts": {
-    "build": "npm run esm && npm run cjs",
+    "build": "tsc",
+    "docs:build": "ldocs build",
+    "docs:dev": "ldocs dev",
     "format": "prettier --write .",
-    "esm": "tsc -p ./tsconfig.esm.json",
-    "cjs": "tsc -p ./tsconfig.cjs.json",
     "test": "vitest"
   },
   "devDependencies": {
-    "prettier": "^3.3.3",
-    "typescript": "^5.6.3",
-    "vitest": "^3.1.4"
+    "@lickle/docs": "0.0.2-dev.2",
+    "@types/node": "^26.1.1",
+    "prettier": "^3.9.4",
+    "typescript": "^7.0.2",
+    "vitest": "^4.1.10"
   },
   "prettier": {
     "semi": false,

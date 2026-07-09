@@ -1,0 +1,4 @@
+minimumReleaseAgeExclude:
+  - '@lickle/docs@0.0.2-dev.2'
+onlyBuiltDependencies:
+  - esbuild
