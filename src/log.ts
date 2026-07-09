@@ -1,212 +1,196 @@
-import { defaultTrace, Fields, Level, Trace } from './trace.js'
+/**
+ *
+ * @example
+ * ```ts
+ * import log, { createLog } from '@lickle/trace/log'
+ * import { defaultTrace } from '@lickle/trace'
+ *
+ * // The default logger is bound to the default trace...
+ * log.info('Hello, world!')
+ *
+ * // ...or bind one explicitly to any trace.
+ * const custom = createLog(defaultTrace, { service: 'api' })
+ * custom.info('Hello, world!')
+ * ```
+ */
+import { Level, type Fields, type Span, type Trace } from './types.ts'
+import defaultTrace from './trace.ts'
 
 /**
- * Represents a logging event that can handle template literals, metadata, and simple messages.
+ * A leveled log function — the equivalent of Rust `tracing`'s event macros
+ * (`info!`, `warn!`, ...), bound to a {@link Trace}.
+ *
  * @example
- * logger.log`Processing request with id ${requestId}`;
- * logger.log({ requestId: '12345' })`Processing request.`;
- * logger.log('Application started successfully.');
+ * ```ts
+ * info`Processing request with id ${requestId}`
+ * info({ requestId: '123' }, 'Processing request.')
+ * info({ requestId: '123' })`Processing request.`
+ * info('Application started successfully.')
+ * error(new Error('boom'))
+ * ```
  */
-type LoggerEvent = {
-  /**
-   * Logs a message using template literals with interpolated strings.
-   * @example
-   * logger.log`Processing request with id ${requestId}`;
-   */
+export type LogFn = {
+  /** Logs a message using template literals with interpolated values. */
   (template: { raw: readonly string[] | ArrayLike<string> }, ...substitutions: any[]): void
 
+  /** Logs a message with attached metadata fields. */
+  (fields: Record<string, any>, message: string | number | null | boolean | Error): void
+
   /**
-   * Logs a message with additional metadata for structured logging.
-   * @example
-   * logger.log({ requestId: '12345' })`Processing request.`;
+   * Attaches metadata fields, returning a function that logs the message.
+   * Note: nothing is emitted until the returned function is called.
    */
-  (meta: Record<string, any>): {
+  (fields: Record<string, any>): {
     (template: { raw: readonly string[] | ArrayLike<string> }, ...substitutions: any[]): void
     (message: string | number | null | boolean | Error): void
   }
 
-  /**
-   * Logs a simple message without interpolation.
-   * @example
-   * logger.log('Application started successfully.');
-   */
+  /** Logs a simple message (or an Error, capturing its stack as fields). */
   (message: string | number | null | boolean | Error): void
 }
 
 /**
- * Represents a span for tracking operations with different log levels.
+ * A span-creating function — the equivalent of `span!`. With a callback it
+ * runs the callback inside the span via `trace.scope` (so it is contained
+ * under async-aware registries) and ends it on return/settle; without one it
+ * returns the entered {@link Span} to end manually (prefer `using`).
+ *
  * @example
- * logger.span('process-request', { requestId: '123' }, async () => {
- *   // do work
- * });
+ * ```ts
+ * span('process-request', { requestId }, async () => { ... })
+ * span('process-request', () => { ... })
+ * using sp = span('process-request')
+ * ```
  */
-type LoggerSpan = {
-  /**
-   * Creates a span with metadata and executes a function within it.
-   * @example
-   * logger.span('process-request', { requestId: '123' }, async () => {
-   *   // do work
-   * });
-   */
-  <R>(name: string, meta: Record<string, any> | undefined | null, fn: () => R): R
-
-  /**
-   * Creates a span and executes a function within it.
-   * @example
-   * logger.span('process-request', async () => {
-   *   // do work
-   * });
-   */
-  <R>(name: string, fn: () => R): R
-
-  /**
-   * Creates a span with metadata and returns an object with an exit method.
-   * @example
-   * const span = logger.span('process-request', { requestId: '123' });
-   * try {
-   *   // do work
-   * } finally {
-   *   span.exit();
-   * }
-   */
-  (name: string, meta: Record<string, any> | undefined | null): { exit: () => void }
-
-  /**
-   * Creates a span and returns an object with an exit method.
-   * @example
-   * const span = logger.span('process-request');
-   * try {
-   *   // do work
-   * } finally {
-   *   span.exit();
-   * }
-   */
-  (name: string): { exit: () => void }
-
-  /** Creates spans at TRACE level */
-  trace: LoggerSpan
-  /** Creates spans at DEBUG level */
-  debug: LoggerSpan
-  /** Creates spans at INFO level */
-  info: LoggerSpan
-  /** Creates spans at WARN level */
-  warn: LoggerSpan
-  /** Creates spans at ERROR level */
-  error: LoggerSpan
+export type SpanFn = {
+  <R>(name: string, fields: Record<string, any> | undefined | null, fn: (span: Span) => R): R
+  <R>(name: string, fn: (span: Span) => R): R
+  (name: string, fields?: Record<string, any> | undefined | null): Span
 }
 
 /**
- * A logger instance that provides structured logging with different levels and spans.
+ * A {@link SpanFn} (INFO when called directly) with per-level variants —
+ * the equivalents of `trace_span!` ... `error_span!`.
+ *
  * @example
- * const logger = new Logger(trace);
- * logger.info`Processing request ${requestId}`;
- * logger.span('operation', async () => {
- *   // do work
- * });
+ * ```ts
+ * span('operation', () => { ... })        // INFO
+ * span.debug('operation', () => { ... })  // DEBUG
+ * ```
  */
-export class Logger {
-  public meta: Record<string, any> = {}
-  public span: LoggerSpan
-  public trace: LoggerEvent
-  public debug: LoggerEvent
-  public info: LoggerEvent
-  public warn: LoggerEvent
-  public error: LoggerEvent
-  public name: (name: string) => Logger
+export type LeveledSpanFn = SpanFn & {
+  trace: SpanFn
+  debug: SpanFn
+  info: SpanFn
+  warn: SpanFn
+  error: SpanFn
+}
 
-  constructor(
-    trace: Trace,
-    private _name?: string,
-  ) {
-    const logfn = (level: Level, fields?: Record<string, any>) => {
-      const self = this
-      return function log(a: any, ...subs: any[]): any {
-        // Handle template literals
-        if (Array.isArray(a) && Array.isArray((a as any).raw)) {
-          const message = String.raw(a as any, ...subs)
-          return trace.event(self._name, level, message, { ...self.meta, ...fields })
-        }
+/**
+ * The macro surface of the library: leveled event functions and span
+ * creation, bound to one {@link Trace} — the equivalent of importing Rust
+ * `tracing`'s macros. Not a logger: there is no name hierarchy; context is
+ * carried by fields ({@link Log.with}) and by spans, as in `tracing`.
+ */
+export interface Log {
+  /** TRACE-level event (`trace!`). */
+  trace: LogFn
+  /** DEBUG-level event (`debug!`). */
+  debug: LogFn
+  /** INFO-level event (`info!`). */
+  info: LogFn
+  /** WARN-level event (`warn!`). */
+  warn: LogFn
+  /** ERROR-level event (`error!`). */
+  error: LogFn
+  /** Span creation (`span!` / `*_span!`). */
+  span: LeveledSpanFn
+  /**
+   * Derive a {@link Log} whose fields are merged into everything it emits —
+   * the `tracing` idiom of attaching context as fields rather than logger
+   * names. Derivations compose: `log.with(a).with(b)` merges both.
+   */
+  with(fields: Fields): Log
+}
 
-        // Handle string
-        if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean' || a === null)
-          return trace.event(self._name, level, a.toString(), { ...self.meta, ...fields })
+/**
+ * Create a {@link Log} bound to `trace` (default: the global trace), with
+ * `meta` merged into every event and span it emits.
+ */
+export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log => {
+  const logFn = (level: Level, extra?: Fields): LogFn => {
+    const emit = (message: string, fields?: Fields) => trace.event(message, level, { ...meta, ...extra, ...fields })
 
-        // Handle error
-        if (a instanceof Error) {
-          const f = { ...self.meta, ...fields, stack: a.stack, name: a.name, cause: a.cause }
-          return trace.event(a.name, level, a.message, f)
-        }
-
-        // Handle object
-        if (typeof a === 'object' && !Array.isArray(a) && a !== null) return logfn(level, { ...fields, ...a })
-
-        // Handle everything else
-        return trace.event(self._name, level, JSON.stringify(a), { ...self.meta, ...fields })
+    return function log(a: any, ...subs: any[]): any {
+      // Template literal: info`msg ${x}`
+      if (Array.isArray(a) && Array.isArray((a as any).raw)) {
+        return emit(String.raw(a as any, ...subs))
       }
-    }
 
-    this.trace = logfn(Level.TRACE)
-    this.debug = logfn(Level.DEBUG)
-    this.info = logfn(Level.INFO)
-    this.warn = logfn(Level.WARN)
-    this.error = logfn(Level.ERROR)
-
-    const spanFn = (level: Level) => {
-      const self = this
-      return function span(
-        name: string,
-        fields?: Fields | undefined | null | (() => void | Promise<void>),
-        fn2?: () => void | Promise<void>,
-      ) {
-        const fn1 = typeof fields === 'function'
-        const sp = trace.span(name, level, fn1 ? self.meta : { ...self.meta, ...fields })
-        if (!fn1 && typeof fn2 === 'undefined') return { exit: () => trace.exit(sp) }
-        try {
-          const r = fn1 ? fields() : fn2!()
-          if (r instanceof Promise) {
-            return r.finally(() => trace.exit(sp))
-          }
-          trace.exit(sp)
-          return r
-        } catch (err) {
-          trace.exit(sp)
-          throw err
-        }
+      // Primitives: info('msg')
+      if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean' || a === null) {
+        return emit(String(a))
       }
-    }
 
-    this.span = Object.assign(spanFn(Level.TRACE), {
+      // Errors: error(err) — capture stack/name/cause as fields
+      if (a instanceof Error) {
+        return emit(a.message, { stack: a.stack, name: a.name, cause: a.cause })
+      }
+
+      // Field objects: emit immediately when a message accompanies the
+      // fields, otherwise return a carrying log function. Beware: a bare
+      // `info({ ... })` emits nothing until the returned function is called.
+      if (typeof a === 'object' && !Array.isArray(a)) {
+        const carried = logFn(level, { ...extra, ...a })
+        return subs.length > 0 ? carried(subs[0]) : carried
+      }
+
+      // Everything else
+      return emit(JSON.stringify(a))
+    } as LogFn
+  }
+
+  const spanFn = (level: Level): SpanFn =>
+    function span(
+      name: string,
+      fields?: Fields | undefined | null | ((span: Span) => unknown),
+      fn2?: (span: Span) => unknown,
+    ): any {
+      const fn = typeof fields === 'function' ? fields : fn2
+      const merged = typeof fields === 'function' || fields == null ? { ...meta } : { ...meta, ...fields }
+      if (!fn) return trace.span(name, level, merged)
+      return trace.scope(name, fn, level, merged)
+    } as SpanFn
+
+  return {
+    trace: logFn(Level.TRACE),
+    debug: logFn(Level.DEBUG),
+    info: logFn(Level.INFO),
+    warn: logFn(Level.WARN),
+    error: logFn(Level.ERROR),
+    span: Object.assign(spanFn(Level.INFO), {
       trace: spanFn(Level.TRACE),
       debug: spanFn(Level.DEBUG),
       info: spanFn(Level.INFO),
       warn: spanFn(Level.WARN),
       error: spanFn(Level.ERROR),
-    }) as Logger['span']
-
-    this.name = (name: string) => {
-      const logger = new Logger(trace, name)
-      logger.meta = { ...this.meta }
-      return logger
-    }
+    }),
+    with: (fields: Fields) => createLog(trace, { ...meta, ...fields }),
   }
 }
 
-export const getTarget = (): string | undefined => {
-  const e = new Error()
-  const lines = e.stack?.split('\n')
-  const last = lines?.slice(1)?.findLastIndex((x) => /\@lickle[\/+]trace/.test(x))
-  if (!last || last < 0) return undefined
-  return lines?.[last + 1]?.replace(/^\s{0,}at\s?/, '').trim()
-}
+/** The default {@link Log}, bound to the default trace. */
+const log: Log = createLog()
+export default log
 
-const defaultLogger: Logger = new Logger(defaultTrace)
-
-export const span = defaultLogger.span
-export const trace = defaultLogger.trace
-export const debug = defaultLogger.debug
-export const info = defaultLogger.info
-export const warn = defaultLogger.warn
-export const error = defaultLogger.error
-export const name = defaultLogger.name
-
-export default defaultLogger
+// Free, tree-shakeable macro equivalents bound to the default trace —
+// `import { info, span } from '@lickle/trace/log'` mirrors `use tracing::info`.
+// `trace` here is the TRACE-level event fn (`tracing::trace!`), not a Trace
+// instance — the default Trace is exported from the package root as
+// `defaultTrace`, so the two never collide.
+export const trace: LogFn = log.trace
+export const debug: LogFn = log.debug
+export const info: LogFn = log.info
+export const warn: LogFn = log.warn
+export const error: LogFn = log.error
+export const span: LeveledSpanFn = log.span
