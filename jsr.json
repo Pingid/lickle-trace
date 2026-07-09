@@ -1,11 +1,17 @@
 {
   "name": "@lickle/trace",
-  "version": "0.0.1-alpha.3",
+  "version": "0.0.1-alpha.5",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
     "./log": "./src/log.ts",
-    "./trace": "./src/trace.ts",
-    "./subscribe": "./src/subscribe.ts"
+    "./layer": "./src/layer/index.ts"
+  },
+  "imports": {
+    "@lickle/trace": "./src/index.ts"
+  },
+  "publish": {
+    "include": ["src/**/*.ts", "README.md", "LICENSE", "jsr.json"],
+    "exclude": ["src/**/*.test.ts"]
   }
 }
