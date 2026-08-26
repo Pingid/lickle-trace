@@ -19,6 +19,6 @@ export function init() {
   trace.install(Console.layer())
 }
 
-export { default as log, createLog, trace, debug, info, warn, error, span } from './log.ts'
+export { default as log, createLog, hook, trace, debug, info, warn, error, span } from './log.ts'
 export { default as defaultTrace } from './trace.ts'
 export * from './trace.ts'

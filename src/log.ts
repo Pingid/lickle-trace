@@ -8,12 +8,16 @@
  * // The default logger is bound to the default trace...
  * log.info('Hello, world!')
  *
- * // ...or bind one explicitly to any trace.
+ * // ...or bind one explicitly to any trace, with context of its own.
  * const custom = createLog(defaultTrace, { service: 'api' })
  * custom.info('Hello, world!')
+ *
+ * // Context can also come from a hook, which may extend the surface.
+ * const counted = custom.with(hook(() => ({ ext: { ping: () => 'pong' } })))
+ * counted.ping()
  * ```
  */
-import { Level, type Fields, type Span, type Trace } from './types.ts'
+import { Level, type Fields, type Layer, type Span, type Trace } from './types.ts'
 import defaultTrace from './trace.ts'
 
 /**
@@ -90,9 +94,9 @@ export type LeveledSpanFn = SpanFn & {
  * The macro surface of the library: leveled event functions and span
  * creation, bound to one {@link Trace} — the equivalent of importing Rust
  * `tracing`'s macros. Not a logger: there is no name hierarchy; context is
- * carried by fields ({@link Log.with}) and by spans, as in `tracing`.
+ * carried by fields ({@link LogCore.with}) and by spans, as in `tracing`.
  */
-export interface Log {
+export interface LogCore<H extends readonly HookLike[] = []> {
   /** TRACE-level event (`trace!`). */
   trace: LogFn
   /** DEBUG-level event (`debug!`). */
@@ -106,20 +110,80 @@ export interface Log {
   /** Span creation (`span!` / `*_span!`). */
   span: LeveledSpanFn
   /**
-   * Derive a {@link Log} whose fields are merged into everything it emits —
-   * the `tracing` idiom of attaching context as fields rather than logger
-   * names. Derivations compose: `log.with(a).with(b)` merges both.
+   * Derive a {@link Log} carrying more context — the `tracing` idiom of
+   * attaching context as fields rather than logger names. Takes fields to
+   * merge into everything it emits, or a {@link Hook} that may also extend
+   * the surface. Derivations compose: `log.with(a).with(b)` carries both,
+   * with `b` winning on conflicting keys and call-site fields winning over
+   * both.
    */
-  with(fields: Fields): Log
+  with<K extends HookLike>(hook: K): Log<[...H, K]>
 }
 
+/** A {@link LogCore} plus every member its hooks contribute through `ext`. */
+export type Log<H extends readonly HookLike[] = []> = LogCore<H> & Merge<ExtOf<H[number]>>
+
 /**
- * Create a {@link Log} bound to `trace` (default: the global trace), with
- * `meta` merged into every event and span it emits.
+ * An extension of a {@link Log}, invoked once per derivation with the log it
+ * is attached to and that log's trace, so it can hold private state in a
+ * closure.
+ *
+ * Emission itself is not a hook concern — filtering and routing belong to a
+ * {@link Layer}, which sees levels and spans as well.
+ *
+ * @example
+ * ```ts
+ * const elapsed = hook((_, trace) => {
+ *   const start = trace.context.now()
+ *   return {
+ *     fields: (fields) => ({ ...fields, uptime: trace.context.now() - start }),
+ *     ext: { since: () => start },
+ *   }
+ * })
+ *
+ * const log = createLog(defaultTrace, elapsed)
+ * log.info('served') // fields: { uptime: 12.5 }
+ * log.since()        // typed, contributed by the hook
+ * ```
  */
-export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log => {
+export type Hook = (
+  self: Log<any>,
+  trace: Trace,
+) => {
+  /** Transform the fields the log carries, applied in derivation order. */
+  fields?: (fields: Fields) => Fields
+  /** Members merged onto the log. {@link LogCore} keys are reserved. */
+  ext?: Ext
+}
+
+/** A {@link Hook}, or a plain fields object as sugar for one. */
+export type HookLike = Hook | Fields
+
+/** Hook-contributed members. Shadowing a {@link LogCore} member is an error. */
+export type Ext = Record<string, any> & { [K in keyof LogCore]?: never }
+
+/** Identity, so a {@link Hook} defined standalone gets its parameter types. */
+export const hook = <K extends Hook>(h: K): K => h
+
+type ExtOf<T> = T extends (...args: any[]) => { ext: infer E } ? E : {}
+type Merge<U> = (U extends any ? (u: U) => void : never) extends (u: infer I) => void ? I : unknown
+
+/**
+ * Create a {@link Log} bound to `trace` (default: the global trace). Each
+ * hook — or plain fields object — contributes context to every event and span
+ * it emits.
+ */
+export const createLog = <H extends readonly HookLike[]>(trace: Trace = defaultTrace, ...hooks: H): Log<H> => {
+  const lgr = {} as any
+  const hks: ReturnType<Hook>[] = []
+
+  // Resolved per emit, so a hook's fields may reflect state that has since
+  // moved on (elapsed time, the request in flight).
+  const carried = () => hks.reduce((fields, h) => h.fields?.(fields) ?? fields, {} as Fields)
+
   const logFn = (level: Level, extra?: Fields): LogFn => {
-    const emit = (message: string, fields?: Fields) => trace.event(message, level, { ...meta, ...extra, ...fields })
+    const emit = (message: string, fields?: Fields) =>
+      trace.event(message, level, { ...carried(), ...extra, ...fields })
 
     return function log(a: any, ...subs: any[]): any {
       // Template literal: info`msg ${x}`
@@ -157,12 +221,12 @@ export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log =
       fn2?: (span: Span) => unknown,
     ): any {
       const fn = typeof fields === 'function' ? fields : fn2
-      const merged = typeof fields === 'function' || fields == null ? { ...meta } : { ...meta, ...fields }
+      const merged = typeof fields === 'function' || fields == null ? carried() : { ...carried(), ...fields }
       if (!fn) return trace.span(name, level, merged)
       return trace.scope(name, fn, level, merged)
     } as SpanFn
 
-  return {
+  Object.assign(lgr, {
     trace: logFn(Level.TRACE),
     debug: logFn(Level.DEBUG),
     info: logFn(Level.INFO),
@@ -175,9 +239,21 @@ export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log =
       warn: spanFn(Level.WARN),
       error: spanFn(Level.ERROR),
     }),
-    with: (fields: Fields) => createLog(trace, { ...meta, ...fields }),
-  }
+    with: (h: HookLike) => createLog(trace, ...hooks, h),
+  })
+
+  // `ext` lands only once every hook has run, so a hook may reference members
+  // contributed by its peers when its own functions are called.
+  for (const h of hooks) hks.push((typeof h === 'function' ? h : fieldsHook(h))(lgr, trace))
+  for (const h of hks) Object.assign(lgr, h.ext)
+
+  return lgr as Log<H>
 }
+
+/** Fields sugar: later derivations win, and call-site fields win over all. */
+const fieldsHook =
+  (fields: Fields): Hook =>
+  () => ({ fields: (carried) => ({ ...carried, ...fields }) })
 
 /** The default {@link Log}, bound to the default trace. */
 const log: Log = createLog()

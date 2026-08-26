@@ -77,6 +77,26 @@ const apiLog = log.with({ service: 'gateway' })
 apiLog.warn('rate limited') // fields: { service: 'gateway' }
 ```
 
+`with` also takes a hook, for context that isn't a fixed value. A hook runs once per derivation, receiving the log it is attached to and that log's trace, so it can keep private state in a closure. It may compute the fields the log carries, and add members of its own through `ext` — those members are typed, so they survive the derivation chain. Later derivations win on conflicting keys, and fields passed at the call site win over both.
+
+```ts
+import { createLog, hook } from '@lickle/trace/log'
+
+const uptime = hook((_, trace) => {
+  const start = trace.context.now()
+  return {
+    fields: (fields) => ({ ...fields, uptime: trace.context.now() - start }),
+    ext: { startedAt: () => start },
+  }
+})
+
+const log = createLog().with(uptime).with({ service: 'gateway' })
+log.info('served') // fields: { uptime: 12.5, service: 'gateway' }
+log.startedAt() // () => number, contributed by the hook
+```
+
+Hooks deliberately cannot intercept emission — filtering and routing see levels and spans, and belong in a [layer](#layers). Names already on the logger (`info`, `span`, `with`, ...) are reserved: a hook that tries to shadow one is a type error.
+
 Spans measure operations. Called with a function, the span runs through `trace.scope`: it ends when the function returns (or the promise settles — even on throw), and under the Node build the span chain is confined to the callback. Without a function you get a span handle whose lifetime you own — end it with `.end()` (or a `using` declaration):
 
 ```ts

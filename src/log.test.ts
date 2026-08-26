@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import { Level, type Event, type Layer, type Span } from './types.ts'
 import { createTrace } from './trace.ts'
-import { createLog } from './log.ts'
+import { createLog, hook } from './log.ts'
 
 const collect = () => {
   const entered: Span[] = []
@@ -71,6 +71,64 @@ describe('Logger', () => {
     log.with({ a: 1 }).with({ b: 2 }).info('hi')
 
     expect(events[0]?.fields).toMatchObject({ a: 1, b: 2 })
+  })
+
+  it('carries nothing but the call-site fields when it has no hooks', () => {
+    const { log, events } = setup()
+
+    log.info('bare')
+
+    expect(events[0]?.fields).toEqual({})
+  })
+
+  it('resolves conflicts in favour of the later derivation, then the call site', () => {
+    const { log, events } = setup()
+
+    log.with({ k: 'first' }).with({ k: 'second' }).info('later wins')
+    log.with({ k: 'first' }).info({ k: 'call-site' }, 'call site wins')
+
+    expect(events[0]?.fields).toMatchObject({ k: 'second' })
+    expect(events[1]?.fields).toMatchObject({ k: 'call-site' })
+  })
+
+  it('hooks contribute fields and extra members, and hold their own state', () => {
+    const { log, events } = setup()
+
+    const counter = hook(() => {
+      let n = 0
+      return { fields: (fields) => ({ ...fields, seq: ++n }), ext: { count: () => n } }
+    })
+
+    const counted = log.with(counter)
+    counted.info('one')
+    counted.info('two')
+
+    expect(events.map((e) => e.fields?.['seq'])).toEqual([1, 2])
+    expect(counted.count()).toBe(2)
+  })
+
+  it('gives hooks the log they are attached to and its trace', () => {
+    const { layer } = collect()
+    const trace = createTrace({ layer })
+    let seen: { self?: unknown; trace?: unknown } = {}
+
+    const spy = hook((self, t) => ((seen = { self, trace: t }), {}))
+    const log = createLog(trace, spy)
+
+    expect(seen.self).toBe(log)
+    expect(seen.trace).toBe(trace)
+  })
+
+  it('composes hooks with fields sugar in either order', () => {
+    const { log, events } = setup()
+
+    const stamp = hook(() => ({ fields: (fields) => ({ ...fields, stamped: true }) }))
+
+    log.with(stamp).with({ service: 'api' }).info('a')
+    log.with({ service: 'api' }).with(stamp).info('b')
+
+    expect(events[0]?.fields).toMatchObject({ stamped: true, service: 'api' })
+    expect(events[1]?.fields).toMatchObject({ stamped: true, service: 'api' })
   })
 
   it('creates spans at INFO by default and at the variant level', async () => {
