@@ -93,6 +93,7 @@ export type LeveledSpanFn = SpanFn & {
  * carried by fields ({@link Log.with}) and by spans, as in `tracing`.
  */
 export interface Log {
+  fields: Fields
   /** TRACE-level event (`trace!`). */
   trace: LogFn
   /** DEBUG-level event (`debug!`). */
@@ -163,6 +164,7 @@ export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log =
     } as SpanFn
 
   return {
+    fields: meta,
     trace: logFn(Level.TRACE),
     debug: logFn(Level.DEBUG),
     info: logFn(Level.INFO),
