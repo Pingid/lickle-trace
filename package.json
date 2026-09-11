@@ -26,36 +26,18 @@
     "./layer": {
       "types": "./dist/layer/index.d.ts",
       "import": "./dist/layer/index.js"
-    }
-  },
-  "imports": {
-    "#registry": {
-      "browser": {
-        "types": "./dist/registry/universal.d.ts",
-        "default": "./dist/registry/universal.js"
-      },
-      "node": {
-        "types": "./dist/registry/node.d.ts",
-        "default": "./dist/registry/node.js"
-      },
-      "default": {
-        "types": "./dist/registry/universal.d.ts",
-        "default": "./dist/registry/universal.js"
-      }
     },
-    "#layer/util": {
-      "browser": {
-        "types": "./dist/layer/util/browser.d.ts",
-        "default": "./dist/layer/util/browser.js"
-      },
-      "node": {
-        "types": "./dist/layer/util/node.d.ts",
-        "default": "./dist/layer/util/node.js"
-      },
-      "default": {
-        "types": "./dist/layer/util/universal.d.ts",
-        "default": "./dist/layer/util/universal.js"
-      }
+    "./ingest": {
+      "types": "./dist/ingest.d.ts",
+      "import": "./dist/ingest.js"
+    },
+    "./propagate": {
+      "types": "./dist/propagate.d.ts",
+      "import": "./dist/propagate.js"
+    },
+    "./test": {
+      "types": "./dist/test.d.ts",
+      "import": "./dist/test.js"
     }
   },
   "files": [
@@ -91,5 +73,8 @@
     "singleQuote": true,
     "printWidth": 120,
     "trailingComma": "all"
+  },
+  "engines": {
+    "node": ">=20.16"
   }
 }

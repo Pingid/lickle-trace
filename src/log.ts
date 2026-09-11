@@ -86,14 +86,25 @@ export type LeveledSpanFn = SpanFn & {
   error: SpanFn
 }
 
+/** Options for {@link Log.instrument}. */
+export interface InstrumentOptions {
+  level?: Level
+  fields?: Fields
+  /** Name the span after the call. Defaults to the static `name`. */
+  name?: string
+}
+
 /**
  * The macro surface of the library: leveled event functions and span
  * creation, bound to one {@link Trace} — the equivalent of importing Rust
  * `tracing`'s macros. Not a logger: there is no name hierarchy; context is
- * carried by fields ({@link Log.with}) and by spans, as in `tracing`.
+ * carried by fields ({@link Log.with}), by spans, and by the target
+ * ({@link Log.target}), as in `tracing`.
  */
 export interface Log {
   fields: Fields
+  /** The target stamped on everything this Log emits, if any. */
+  targetName: string | undefined
   /** TRACE-level event (`trace!`). */
   trace: LogFn
   /** DEBUG-level event (`debug!`). */
@@ -112,15 +123,39 @@ export interface Log {
    * names. Derivations compose: `log.with(a).with(b)` merges both.
    */
   with(fields: Fields): Log
+  /**
+   * Derive a {@link Log} that stamps `target` on everything it emits, so
+   * `envFilter` from `@lickle/trace/layer` can route it by module path.
+   *
+   * @example
+   * ```ts
+   * const dbLog = log.target('app:db')
+   * dbLog.debug('connection acquired') // visible under `app:db=debug`
+   * ```
+   */
+  target(target: string): Log
+  /**
+   * Wrap `fn` so every call runs inside a span — the equivalent of
+   * `#[instrument]`. The span ends when the call returns or settles, and
+   * records a throw or rejection before rethrowing it.
+   *
+   * @example
+   * ```ts
+   * const handle = log.instrument('handle-request', async (req: Request) => { ... })
+   * await handle(req) // spanned
+   * ```
+   */
+  instrument<A extends any[], R>(name: string, fn: (...args: A) => R, options?: InstrumentOptions): (...args: A) => R
 }
 
 /**
  * Create a {@link Log} bound to `trace` (default: the global trace), with
- * `meta` merged into every event and span it emits.
+ * `meta` merged into every event and span it emits, stamped with `target`.
  */
-export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log => {
+export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}, target?: string): Log => {
   const logFn = (level: Level, extra?: Fields): LogFn => {
-    const emit = (message: string, fields?: Fields) => trace.event(message, level, { ...meta, ...extra, ...fields })
+    const emit = (message: string, fields?: Fields) =>
+      trace.event(message, level, { ...meta, ...extra, ...fields }, target)
 
     return function log(a: any, ...subs: any[]): any {
       // Template literal: info`msg ${x}`
@@ -159,12 +194,13 @@ export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log =
     ): any {
       const fn = typeof fields === 'function' ? fields : fn2
       const merged = typeof fields === 'function' || fields == null ? { ...meta } : { ...meta, ...fields }
-      if (!fn) return trace.span(name, level, merged)
-      return trace.scope(name, fn, level, merged)
+      if (!fn) return trace.span(name, level, merged, target)
+      return trace.scope(name, fn, level, merged, target)
     } as SpanFn
 
   return {
     fields: meta,
+    targetName: target,
     trace: logFn(Level.TRACE),
     debug: logFn(Level.DEBUG),
     info: logFn(Level.INFO),
@@ -177,7 +213,13 @@ export const createLog = (trace: Trace = defaultTrace, meta: Fields = {}): Log =
       warn: spanFn(Level.WARN),
       error: spanFn(Level.ERROR),
     }),
-    with: (fields: Fields) => createLog(trace, { ...meta, ...fields }),
+    with: (fields: Fields) => createLog(trace, { ...meta, ...fields }, target),
+    target: (next: string) => createLog(trace, meta, next),
+    instrument<A extends any[], R>(name: string, fn: (...args: A) => R, options: InstrumentOptions = {}) {
+      const level = options.level ?? Level.INFO
+      const fields = { ...meta, ...options.fields }
+      return (...args: A): R => trace.scope(options.name ?? name, () => fn(...args), level, fields, target)
+    },
   }
 }
 
@@ -189,10 +231,12 @@ export default log
 // `import { info, span } from '@lickle/trace/log'` mirrors `use tracing::info`.
 // `trace` here is the TRACE-level event fn (`tracing::trace!`), not a Trace
 // instance — the default Trace is exported from the package root as
-// `defaultTrace`, so the two never collide.
+// `defaultTrace`, and the root no longer re-exports these, so the two names
+// can never collide on one import.
 export const trace: LogFn = log.trace
 export const debug: LogFn = log.debug
 export const info: LogFn = log.info
 export const warn: LogFn = log.warn
 export const error: LogFn = log.error
 export const span: LeveledSpanFn = log.span
+export const instrument: Log['instrument'] = log.instrument
