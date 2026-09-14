@@ -8,10 +8,9 @@ import {
   type Trace,
   type TraceContext,
   type Layer,
-  type RawTrace,
 } from './types.ts'
-import { registry } from '#registry'
-import { enabled, now, uid } from './util.ts'
+import { registry } from './registry.ts'
+import { enabled, errorFields, now, uid } from './util.ts'
 
 /** Marks a span as ended so `exit` is idempotent even if the registry misses. */
 const kEnded = Symbol('lickle.ended')
@@ -25,7 +24,6 @@ const kEnded = Symbol('lickle.ended')
  */
 class TraceImpl implements Trace {
   context: TraceContext
-  raw: RawTrace
 
   constructor(options?: Partial<TraceContext>) {
     this.context = {
@@ -35,18 +33,18 @@ class TraceImpl implements Trace {
       uid: uid,
       ...options,
     }
-    this.raw = new RawTraceImpl(this)
   }
 
   /** Replace the layer receiving this trace's spans and events. */
-  install(layer: Layer): void {
+  install = (layer: Layer): void => {
     this.context.layer = layer
   }
 
   /** The span currently active in this trace's context, if any. */
-  current(): Span | undefined {
-    return this.context.spans.current()
-  }
+  current = (): Span | undefined => this.context.spans.current()
+
+  /** Ask the installed layer to drain anything it has buffered. */
+  flush = (): Promise<void> => Promise.resolve(this.context.layer.flush?.()).then(() => undefined)
 
   /**
    * Create a span parented to the currently-active span (if any).
@@ -59,129 +57,97 @@ class TraceImpl implements Trace {
    * remain current beyond its intended lifetime. When work has a natural
    * function boundary, prefer {@link scope}, which confines the span chain.
    */
-  span = (name: string, level: Level = Level.INFO, fields?: Fields): Span => {
+  span = (name: string, level: Level = Level.INFO, fields?: Fields, target?: string): Span => {
     const parent = this.current()
-    if (!enabled(level, this.context.layer)) return SpanImpl.noop(this, name, level, parent)
-    return SpanImpl.start(this, name, level, parent, fields)
+    if (!enabled(level, this.context.layer)) return SpanImpl.noop(this, name, level, parent, target)
+    return SpanImpl.start(this, name, level, parent, fields, target)
   }
 
   /** Emit an event, attributed to the active span if one exists. */
-  event = (message: string, level: Level = Level.INFO, fields: Fields = {}): void => {
+  event = (message: string, level: Level = Level.INFO, fields: Fields = {}, target?: string): void => {
     if (!enabled(level, this.context.layer)) return
-    this.context.layer.onEvent?.(EventImpl.emit(this, level, message, fields), this)
-  }
-
-  /** Low-level enter: make `sp` current. Prefer `span.in`. */
-  enter = (sp: Span): void => {
-    if (sp.id === '') return // no-op span
-    this.context.spans.push(sp)
-  }
-
-  /**
-   * Low-level exit. Idempotent — a second call is a no-op. Robust to
-   * out-of-order exits: removes the span wherever it sits in the context
-   * rather than only popping the top, so async interleaving can't leak.
-   */
-  exit = (sp: Span): void => {
-    if (sp.id === '') return
-    const marked = sp as Span & { [kEnded]?: boolean }
-    if (marked[kEnded]) return // already ended
-    marked[kEnded] = true
-    this.context.spans.remove(sp)
-    this.context.layer.onExit?.(sp, this)
+    this.context.layer.onEvent?.(EventImpl.emit(this, level, message, fields, target), this)
   }
 
   /**
    * Run `fn` inside a fresh span, ending it when `fn` returns (or, if `fn`
-   * returns a promise, when it settles). Under an async-aware registry the
-   * span chain is confined to the scope, so concurrent scopes can't see or
-   * corrupt each other's parenting.
+   * returns a promise, when it settles). A throw or rejection is recorded on
+   * the span as an `error` field before it exits, then rethrown untouched.
+   *
+   * Under an async-aware registry the span chain is confined to the scope, so
+   * concurrent scopes can't see or corrupt each other's parenting.
    */
-  scope<T>(name: string, fn: (sp: Span) => T, level?: Level, fields?: Fields): T
-  scope<T>(name: string, fn: (sp: Span) => Promise<T>, level?: Level, fields?: Fields): Promise<T>
-  scope<T>(name: string, fn: (sp: Span) => T | Promise<T>, level: Level = Level.INFO, fields?: Fields): T | Promise<T> {
+  scope = <T>(name: string, fn: (sp: Span) => T, level: Level = Level.INFO, fields?: Fields, target?: string): T => {
     const parent = this.current()
 
     if (!enabled(level, this.context.layer)) {
-      return fn(SpanImpl.noop(this, name, level, parent))
+      return fn(SpanImpl.noop(this, name, level, parent, target))
     }
 
     return this.context.spans.run(() => {
-      const sp = SpanImpl.start(this, name, level, parent, fields)
+      const sp = SpanImpl.start(this, name, level, parent, fields, target)
 
       try {
-        const result: any = fn(sp)
+        const result: unknown = fn(sp)
 
-        if (result && typeof (result as PromiseLike<T>).then === 'function') {
-          return Promise.resolve(result).finally(() => sp.end())
+        if (result && typeof (result as PromiseLike<unknown>).then === 'function') {
+          return Promise.resolve(result).then(
+            (value) => {
+              sp.end()
+              return value
+            },
+            (err: unknown) => {
+              sp.setFields(errorFields(err))
+              sp.end()
+              throw err
+            },
+          ) as T
         }
 
         sp.end()
-        return result
+        return result as T
       } catch (err) {
+        sp.setFields(errorFields(err))
         sp.end()
         throw err
       }
     })
   }
-}
 
-/**
- * Ingestion boundary for spans and events from another context (another
- * Trace, another runtime, the Rust `tracing` bridge over wasm).
- *
- * Owns the index of foreign spans currently in flight: `enter` hydrates the
- * wire shape into a real {@link Span} exactly once (firing `newSpan`/`onEnter`
- * and making it current), `exit` retires it, and `event` resolves `parent`
- * against the in-flight index. The index holds only live foreign spans, so
- * it cannot accumulate past what the foreign side has open.
- */
-class RawTraceImpl implements RawTrace {
-  private active = new Map<string, Span>()
-
-  constructor(private trace: TraceImpl) {}
-
-  enter(sb: SpanBase): void {
-    if (!enabled(sb.level, this.trace.context.layer)) return
-    if (this.active.has(sb.id)) return // idempotent re-entry
-    const parent = sb.parentId !== undefined ? this.active.get(sb.parentId) : undefined
-    const sp = SpanImpl.hydrate(sb, this.trace, parent)
-    this.active.set(sp.id, sp)
-
-    const layer = this.trace.context.layer
-    const ext = layer.newSpan?.(sp, this.trace)
-    if (ext !== undefined) sp.ext = ext
-    this.trace.context.spans.push(sp)
-    layer.onEnter?.(sp, this.trace)
-  }
-
-  exit(sb: SpanBase): void {
-    const sp = this.active.get(sb.id)
-    if (!sp) return // unknown, filtered at enter, or already exited
-    this.active.delete(sb.id)
-    this.trace.exit(sp) // handles idempotence, registry removal, onExit
-  }
-
-  event(eb: EventBase): void {
-    if (!enabled(eb.level, this.trace.context.layer)) return
-    const parent = eb.parentId !== undefined ? this.active.get(eb.parentId) : undefined
-    this.trace.context.layer.onEvent?.(EventImpl.hydrate(eb, parent), this.trace)
+  /**
+   * Internal exit path, deliberately absent from the public {@link Trace}
+   * surface — `span.end()`, `span.in()` and `scope()` are the ways in.
+   *
+   * Idempotent: a second call is a no-op. Robust to out-of-order exits —
+   * removes the span wherever it sits in the context rather than only popping
+   * the top, so async interleaving can't leak.
+   */
+  exit(sp: Span): void {
+    if (sp.id === '') return // no-op span
+    const marked = sp as Span & { [kEnded]?: boolean }
+    if (marked[kEnded]) return // already ended
+    marked[kEnded] = true
+    sp.endTimestamp = this.context.now()
+    this.context.spans.remove(sp)
+    this.context.layer.onExit?.(sp, this)
   }
 }
 
 class SpanImpl implements Span {
   readonly type = 'span' as const
   id: string
+  traceId: string
   timestamp: number
+  endTimestamp?: number | undefined
+  target?: string | undefined
   fields?: Fields | undefined
-  ext?: unknown
   parentId?: string | undefined
   parent?: Span | undefined
 
   /**
    * Pure assignment only — no hook firing, no registry push. Lifecycle entry
-   * happens in {@link SpanImpl.start} (local spans) or at the {@link RawTrace}
-   * boundary (foreign spans), so hydration can never double-fire `onEnter`.
+   * happens in {@link SpanImpl.start} (local spans) or in {@link adoptSpan}
+   * (foreign spans), so hydration can never double-fire `onEnter`.
    */
   private constructor(
     private trace: TraceImpl,
@@ -190,22 +156,43 @@ class SpanImpl implements Span {
     parent: Span | undefined,
     parentId: string | undefined,
     id: string,
+    traceId: string,
     timestamp: number,
     fields?: Fields,
+    target?: string,
   ) {
     this.id = id
+    this.traceId = traceId
     this.timestamp = timestamp
     this.parent = parent
     this.parentId = parentId
+    this.target = target
     this.fields = fields ? { ...fields } : undefined
   }
 
-  /** Create a live local span: assigns identity, fires `newSpan`/`onEnter`, makes it current. */
-  static start(trace: TraceImpl, name: string, level: Level, parent: Span | undefined, fields?: Fields): SpanImpl {
+  /** Create a live local span: assigns identity, makes it current, fires `onEnter`. */
+  static start(
+    trace: TraceImpl,
+    name: string,
+    level: Level,
+    parent: Span | undefined,
+    fields?: Fields,
+    target?: string,
+  ): SpanImpl {
     const { uid, now, layer, spans } = trace.context
-    const span = new SpanImpl(trace, name, level, parent, parent?.id, uid(), now(), fields)
-    const ext = layer.newSpan?.(span, trace)
-    if (ext !== undefined) span.ext = ext
+    // A root span mints the trace id; every descendant inherits it unchanged.
+    const span = new SpanImpl(
+      trace,
+      name,
+      level,
+      parent,
+      parent?.id,
+      uid(),
+      parent?.traceId || uid(),
+      now(),
+      fields,
+      target,
+    )
     // Make the span current before notifying, so anything a layer emits from
     // `onEnter` is attributed to this span rather than its parent.
     spans.push(span)
@@ -214,17 +201,28 @@ class SpanImpl implements Span {
   }
 
   /** Rebuild a span from its wire shape without firing any lifecycle hooks. */
-  static hydrate(sb: SpanBase, trace: TraceImpl, parent?: Span): SpanImpl {
-    const span = new SpanImpl(trace, sb.name, sb.level, parent, sb.parentId, sb.id, sb.timestamp, sb.fields)
-    span.ext = sb.ext
+  static hydrate(trace: TraceImpl, sb: SpanBase, parent?: Span): SpanImpl {
+    const span = new SpanImpl(
+      trace,
+      sb.name,
+      sb.level,
+      parent,
+      sb.parentId,
+      sb.id,
+      sb.traceId || parent?.traceId || trace.context.uid(),
+      sb.timestamp,
+      sb.fields,
+      sb.target,
+    )
+    span.endTimestamp = sb.endTimestamp
     return span
   }
 
   /** An inert span for filtered-out levels; safe to enter/child/end/pass around. */
-  static noop(trace: TraceImpl, name: string, level: Level, parent: Span | undefined): SpanImpl {
+  static noop(trace: TraceImpl, name: string, level: Level, parent: Span | undefined, target?: string): SpanImpl {
     // A filtered-out span is invisible, so its children parent to the same
     // span it would have — hence parent/parentId still point at the real parent.
-    return new SpanImpl(trace, name, level, parent, parent?.id, '', 0)
+    return new SpanImpl(trace, name, level, parent, parent?.id, '', parent?.traceId ?? '', 0, undefined, target)
   }
 
   private get isNoop(): boolean {
@@ -236,12 +234,13 @@ class SpanImpl implements Span {
     this.fields = { ...this.fields, ...fields }
   }
 
-  child(name: string, level?: Level, fields?: Fields): Span {
+  child(name: string, level?: Level, fields?: Fields, target?: string): Span {
     const lvl = level ?? this.level
+    const tgt = target ?? this.target
     if (!enabled(lvl, this.trace.context.layer))
-      return SpanImpl.noop(this.trace, name, lvl, this.isNoop ? this.parent : this)
-    if (this.isNoop) return SpanImpl.start(this.trace, name, lvl, this.parent, fields)
-    return SpanImpl.start(this.trace, name, lvl, this, fields)
+      return SpanImpl.noop(this.trace, name, lvl, this.isNoop ? this.parent : this, tgt)
+    if (this.isNoop) return SpanImpl.start(this.trace, name, lvl, this.parent, fields, tgt)
+    return SpanImpl.start(this.trace, name, lvl, this, fields, tgt)
   }
 
   in<T>(fn: (span: Span) => T): T {
@@ -263,13 +262,15 @@ class SpanImpl implements Span {
   toJSON(): SpanBase {
     return {
       id: this.id,
+      traceId: this.traceId,
       type: 'span',
       name: this.name,
       level: this.level,
       timestamp: this.timestamp,
+      endTimestamp: this.endTimestamp,
+      target: this.target,
       parentId: this.parentId,
       fields: this.fields,
-      ext: this.ext,
     }
   }
 }
@@ -277,7 +278,9 @@ class SpanImpl implements Span {
 class EventImpl implements Event {
   readonly type = 'event' as const
   id: string
+  traceId: string
   timestamp: number
+  target?: string | undefined
   parentId?: string | undefined
   /** Best-effort reference captured at creation; `parentId` is the durable link. */
   parent?: Span | undefined
@@ -285,35 +288,52 @@ class EventImpl implements Event {
   private constructor(
     public level: Level,
     id: string,
+    traceId: string,
     timestamp: number,
     parent: Span | undefined,
     parentId: string | undefined,
     public message?: string | undefined,
     public fields?: Fields | undefined,
+    target?: string,
   ) {
     this.id = id
+    this.traceId = traceId
     this.timestamp = timestamp
     this.parent = parent
     this.parentId = parentId
+    this.target = target
   }
 
   /** Create a local event, capturing the currently-active span by reference. */
-  static emit(trace: TraceImpl, level: Level, message: string, fields?: Fields): EventImpl {
+  static emit(trace: TraceImpl, level: Level, message: string, fields?: Fields, target?: string): EventImpl {
     const parent = trace.current()
-    return new EventImpl(level, trace.context.uid(), trace.context.now(), parent, parent?.id, message, fields)
+    const { uid, now } = trace.context
+    return new EventImpl(level, uid(), parent?.traceId || uid(), now(), parent, parent?.id, message, fields, target)
   }
 
-  /** Rebuild an event from its wire shape; `parent` resolved by the caller (RawTrace). */
-  static hydrate(eb: EventBase, parent?: Span): EventImpl {
-    return new EventImpl(eb.level, eb.id, eb.timestamp, parent, eb.parentId, eb.message, eb.fields)
+  /** Rebuild an event from its wire shape; `parent` resolved by the caller. */
+  static hydrate(trace: TraceImpl, eb: EventBase, parent?: Span): EventImpl {
+    return new EventImpl(
+      eb.level,
+      eb.id,
+      eb.traceId || parent?.traceId || trace.context.uid(),
+      eb.timestamp,
+      parent,
+      eb.parentId,
+      eb.message,
+      eb.fields,
+      eb.target,
+    )
   }
 
   toJSON(): EventBase {
     return {
       id: this.id,
+      traceId: this.traceId,
       type: 'event',
       level: this.level,
       timestamp: this.timestamp,
+      target: this.target,
       parentId: this.parentId,
       fields: this.fields,
       message: this.message,
@@ -321,18 +341,58 @@ class EventImpl implements Event {
   }
 }
 
-export const createTrace = (options?: Partial<TraceContext>): Trace => {
-  return new TraceImpl(options)
+/**
+ * Materialize a span that originated somewhere else — another Trace, another
+ * runtime, an incoming `traceparent` — as a live span in `trace`: hydrated,
+ * made current, and announced to the layer with `onEnter`.
+ *
+ * This is the one primitive the core owes the outside world; everything that
+ * crosses a boundary (`@lickle/trace/ingest`, `@lickle/trace/propagate`) is
+ * built on it plus `span.end()`. Returns `undefined` when the span's level is
+ * filtered out.
+ */
+export const adoptSpan = (trace: Trace, span: SpanBase, parent?: Span): Span | undefined => {
+  const t = trace as TraceImpl
+  if (!enabled(span.level, t.context.layer)) return undefined
+  const sp = SpanImpl.hydrate(t, span, parent)
+  t.context.spans.push(sp)
+  t.context.layer.onEnter?.(sp, t)
+  return sp
 }
 
+/**
+ * Make a span from another context current *without* announcing it.
+ *
+ * The difference from {@link adoptSpan} is who owns the record: a span arriving
+ * through `@lickle/trace/ingest` is ours to report, while the remote parent
+ * named by an incoming `traceparent` has already been reported by the caller —
+ * announcing it again would double-count it at the collector. A linked span is
+ * pure context: descendants inherit its `traceId` and parent onto its id.
+ *
+ * It is not level-filtered, since context is not a record. Remove it with
+ * `trace.context.spans.remove(span)` — never `end()`, which announces.
+ */
+export const linkSpan = (trace: Trace, span: SpanBase, parent?: Span): Span => {
+  const t = trace as TraceImpl
+  const sp = SpanImpl.hydrate(t, span, parent)
+  t.context.spans.push(sp)
+  return sp
+}
+
+/**
+ * Deliver an event that originated somewhere else, resolving `parent` from the
+ * caller rather than from the active stack. See {@link adoptSpan}.
+ */
+export const adoptEvent = (trace: Trace, event: EventBase, parent?: Span): void => {
+  const t = trace as TraceImpl
+  if (!enabled(event.level, t.context.layer)) return
+  t.context.layer.onEvent?.(EventImpl.hydrate(t, event, parent), t)
+}
+
+export const createTrace = (options?: Partial<TraceContext>): Trace => new TraceImpl(options)
+
 /** The default global trace instance. */
-const defaultTrace = createTrace()
+const defaultTrace: Trace = createTrace()
 
 /** The default global trace instance. */
 export default defaultTrace
-
-export type { Fields, Span, SpanBase, Event, EventBase, Trace, TraceContext, Layer, RawTrace }
-
-export { Level }
-
-export * from '#registry'

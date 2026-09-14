@@ -1,4 +1,4 @@
-import { Level, type Layer } from './types.ts'
+import { severity, type Fields, type Layer, type Level } from './types.ts'
 
 // `Symbol.dispose` may be absent on older runtimes (some wasm hosts, older
 // Safari). Polyfill it here — this module loads before any span is created —
@@ -18,9 +18,9 @@ const randomHex = (bytes: number): string => {
 /**
  * Unique id for traces, spans, and events alike.
  *
- * The shape is opaque — nothing in the core depends on it. An OTLP exporter
- * translates these into spec-shaped 16-byte trace / 8-byte span ids (e.g. by
- * hashing) at export time, so the wire format never leaks into the core.
+ * The shape is opaque — nothing in the core depends on it. `@lickle/trace/propagate`
+ * derives spec-shaped 16-byte trace / 8-byte span ids from these at the wire
+ * boundary, so no wire format leaks into the core.
  */
 export const uid = (): string =>
   g.crypto?.randomUUID ? g.crypto.randomUUID() : `${randomHex(8)}-${randomHex(4)}-${randomHex(4)}-${randomHex(6)}`
@@ -34,7 +34,15 @@ export const uid = (): string =>
  */
 export const now = (): number => (g.performance?.now ? g.performance.timeOrigin + g.performance.now() : Date.now())
 
+/** Checks whether a level passes a layer's `minLevel` floor. */
+export const enabled = (level: Level, layer?: Layer): boolean =>
+  severity[level] >= (layer?.minLevel ? severity[layer.minLevel] : 0)
+
 /**
- * Checks if a level is enabled based on a minimum level.
+ * Normalize a thrown value into fields. Used when a `scope` callback rejects
+ * or throws, so a failed span carries its cause rather than exiting silently.
  */
-export const enabled = (level: Level, layer?: Layer) => level >= (layer?.minLevel ?? Level.TRACE)
+export const errorFields = (err: unknown): Fields =>
+  err instanceof Error
+    ? { error: { name: err.name, message: err.message, stack: err.stack, cause: err.cause } }
+    : { error: err }

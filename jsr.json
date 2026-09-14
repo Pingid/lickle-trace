@@ -1,11 +1,14 @@
 {
   "name": "@lickle/trace",
-  "version": "0.0.1-alpha.8",
+  "version": "0.0.1-alpha.9",
   "license": "MIT",
   "exports": {
     ".": "./src/index.ts",
     "./log": "./src/log.ts",
-    "./layer": "./src/layer/index.ts"
+    "./layer": "./src/layer/index.ts",
+    "./ingest": "./src/ingest.ts",
+    "./propagate": "./src/propagate.ts",
+    "./test": "./src/test.ts"
   },
   "imports": {
     "@lickle/trace": "./src/index.ts"
