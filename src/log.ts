@@ -38,7 +38,7 @@ export type LogFn = {
   (template: { raw: readonly string[] | ArrayLike<string> }, ...substitutions: any[]): void
 
   /** Logs a message with attached metadata fields. */
-  (fields: Record<string, any>, message: string | number | null | boolean | Error): void
+  (fields: Record<string, any>, ...messages: MessageParts): void
 
   /**
    * Attaches metadata fields, returning a function that logs the message.
@@ -46,12 +46,15 @@ export type LogFn = {
    */
   (fields: Record<string, any>): {
     (template: { raw: readonly string[] | ArrayLike<string> }, ...substitutions: any[]): void
-    (message: string | number | null | boolean | Error): void
+    (...messages: MessageParts): void
   }
 
   /** Logs a simple message (or an Error, capturing its stack as fields). */
-  (message: string | number | null | boolean | Error): void
+  (...messages: MessageParts): void
 }
+
+type MessagePrimitivePart = string | number | null | boolean
+type MessageParts = [Error, ...MessagePrimitivePart[]] | MessagePrimitivePart[]
 
 /**
  * A span-creating function — the equivalent of `span!`. With a callback it
@@ -179,11 +182,13 @@ export const createLog = <H extends readonly HookLike[]>(trace: Trace = defaultT
 
   // Resolved per emit, so a hook's fields may reflect state that has since
   // moved on (elapsed time, the request in flight).
-  const carried = () => hks.reduce((fields, h) => h.fields?.(fields) ?? fields, {} as Fields)
+  const carried = (fields?: Fields) => hks.reduce((fields, h) => h.fields?.(fields) ?? fields, fields ?? ({} as Fields))
 
   const logFn = (level: Level, extra?: Fields): LogFn => {
+    const source = captureSource(logFn)
+
     const emit = (message: string, fields?: Fields) =>
-      trace.event(message, level, { ...carried(), ...extra, ...fields })
+      trace.event(message, level, carried({ source, ...extra, ...fields }))
 
     return function log(a: any, ...subs: any[]): any {
       // Template literal: info`msg ${x}`
@@ -191,26 +196,27 @@ export const createLog = <H extends readonly HookLike[]>(trace: Trace = defaultT
         return emit(String.raw(a as any, ...subs))
       }
 
-      // Primitives: info('msg')
-      if (typeof a === 'string' || typeof a === 'number' || typeof a === 'boolean' || a === null) {
-        return emit(String(a))
-      }
+      let extraFields: Fields = {}
+      let parts: MessageParts = []
 
       // Errors: error(err) — capture stack/name/cause as fields
       if (a instanceof Error) {
-        return emit(a.message, { stack: a.stack, name: a.name, cause: a.cause })
+        extraFields = { stack: a.stack, name: a.name, cause: a.cause }
+        parts.push(a.message)
       }
 
       // Field objects: emit immediately when a message accompanies the
       // fields, otherwise return a carrying log function. Beware: a bare
       // `info({ ... })` emits nothing until the returned function is called.
-      if (typeof a === 'object' && !Array.isArray(a)) {
-        const carried = logFn(level, { ...extra, ...a })
-        return subs.length > 0 ? carried(subs[0]) : carried
+      else if (a != null && typeof a === 'object' && !Array.isArray(a)) {
+        extraFields = { ...extraFields, ...a }
+        if (subs.length === 0) return logFn(level, { ...extra, ...extraFields })
+      } else {
+        parts.push(a)
       }
+      parts.push(...subs)
 
-      // Everything else
-      return emit(JSON.stringify(a))
+      return emit(parts.join(' '), { ...extra, ...extraFields })
     } as LogFn
   }
 
@@ -248,6 +254,17 @@ export const createLog = <H extends readonly HookLike[]>(trace: Trace = defaultT
   for (const h of hks) Object.assign(lgr, h.ext)
 
   return lgr as Log<H>
+}
+
+type AnyFn = (...args: any[]) => any
+
+Error.stackTraceLimit = Infinity
+const captureSource = (target: AnyFn) => {
+  const err = new Error()
+  ;(Error as { captureStackTrace?: (target: object, ctor?: AnyFn) => void }).captureStackTrace?.(err, target)
+  const stack = err.stack?.split('\n') ?? []
+  const frame = stack.slice(1)[0]
+  return /\((.*)\)/.exec(frame ?? '')?.[1]?.trim()
 }
 
 /** Fields sugar: later derivations win, and call-site fields win over all. */
